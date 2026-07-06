@@ -7,7 +7,7 @@
 ## 当前入口
 
 - `docs/design/mysynthesizer-synthesizer-design.md`：合成器机制、正向模型、AI 操作规则的统一设计文档。
-- `docs/design/synthesizer-engine-implementation.md`：Python 后端合成器引擎的数据模型、pipeline、SQLite 轻量存储和评估设计。
+- `docs/design/synthesizer-engine-implementation.md`：Python 后端合成器引擎的数据模型、pipeline、SQLite 轻量存储、向量化、质量治理和评估设计。
 - `outputs/data/current/`：当前最新可用合成数据。
 
 ## 重要文件
@@ -16,7 +16,7 @@
   合并后的权威设计入口，包含机制分析、正向合成流程、匹配/新建判断、type 统计、专名化策略和后续 AI 工作规范。
 
 - `docs/design/synthesizer-engine-implementation.md`  
-  面向最终 Python 后端实现的工程设计入口，定义合成器引擎边界、对象模型、SQLite 轻量存储、候选生成、检索评分、命中/新建决策和回放评估方法。
+  面向最终 Python 后端实现的工程设计入口，定义合成器引擎边界、对象模型、SQLite 轻量存储、向量化、只增图治理、质量治理、候选生成、检索评分、命中/新建决策和回放评估方法。
 
 - `outputs/data/current/mysynthesizer_mine_full_routes_latest.json`  
   当前最新完整图谱。最近一次刷新为 `1355 objects / 3100 craft_sources`。
