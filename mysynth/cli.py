@@ -27,6 +27,7 @@ def main() -> None:
 
     eval_parser = subparsers.add_parser("eval")
     eval_parser.add_argument("--limit", type=int)
+    eval_parser.add_argument("--failures", type=int, default=20)
 
     args = parser.parse_args()
     store = SQLiteObjectStore(db_path=args.db, source_path=args.source)
@@ -44,7 +45,7 @@ def main() -> None:
             result = RuleSynthesizerEngine(store).craft(request)
             print(result.model_dump_json(indent=2))
         elif args.command == "eval":
-            summary = evaluate_routes(store, limit=args.limit)
+            summary = evaluate_routes(store, limit=args.limit, max_failures=args.failures)
             print(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2))
     finally:
         store.close()

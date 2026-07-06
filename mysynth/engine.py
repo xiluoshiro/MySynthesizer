@@ -106,7 +106,7 @@ class RuleSynthesizerEngine:
         scored: list[tuple[CandidateObject, MatchScore]] = []
         best_by_object: dict[int, tuple[CandidateObject, MatchScore]] = {}
         for candidate in candidates:
-            retrieved = self.store.search_candidates(candidate, request.options.max_retrieved)
+            retrieved = self._retrieve_for_candidate(candidate, request)
             for obj in retrieved:
                 route_prior = self._route_prior(request, obj.id)
                 match = score_match(candidate, obj, route_prior=route_prior)
@@ -118,6 +118,31 @@ class RuleSynthesizerEngine:
         if scored:
             return scored[0][0], [item[1] for item in scored]
         return candidates[0], []
+
+    def _retrieve_for_candidate(self, candidate: CandidateObject, request: CraftRequest) -> list[SynthObject]:
+        objects: list[SynthObject] = []
+        seen: set[int] = set()
+
+        def add_many(values: list[SynthObject]) -> None:
+            for value in values:
+                if value.id is not None and value.id not in seen:
+                    seen.add(value.id)
+                    objects.append(value)
+
+        add_many(self.store.search_candidates(candidate, request.options.max_retrieved))
+        if request.ingredient_a.id is not None:
+            add_many(self.store.get_neighbors(request.ingredient_a.id, limit=20))
+        if request.ingredient_b.id is not None:
+            add_many(self.store.get_neighbors(request.ingredient_b.id, limit=20))
+        if request.ingredient_a.id is not None and request.ingredient_b.id is not None:
+            direct_edges = self.store.find_edges_by_inputs(
+                request.ingredient_a.id,
+                request.ingredient_b.id,
+                request.operation,
+            )
+            add_many([obj for edge in direct_edges if (obj := self.store.get_object(edge.result_id)) is not None])
+        add_many(self.store.search_by_type_and_tokens(candidate.type, candidate.core_tags, limit=20))
+        return objects[: request.options.max_retrieved]
 
     def _route_prior(self, request: CraftRequest, object_id: int | None) -> float:
         if object_id is None:

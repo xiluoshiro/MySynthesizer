@@ -87,6 +87,23 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertIsNotNone(cached)
         self.assertEqual(cached.name, "水")
 
+    # 测试点：store 能用无序 add 输入查询路线并返回输入邻接对象。
+    def test_store_queries_edges_and_neighbors(self) -> None:
+        edges = self.store.find_edges_by_inputs(3, 2, "add")
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0].result_id, 1)
+
+        neighbors = {obj.id for obj in self.store.get_neighbors(2)}
+        self.assertIn(1, neighbors)
+        self.assertIn(3, neighbors)
+
+    # 测试点：type 加 token 召回会限制类型并返回语义相关对象。
+    def test_store_searches_by_type_and_tokens(self) -> None:
+        matches = self.store.search_by_type_and_tokens("element", ["燃烧", "清洁能源"], limit=10)
+        names = {obj.name for obj in matches}
+        self.assertIn("火", names)
+        self.assertIn("氢气", names)
+
     # 测试点：已有路线的合成会优先命中 recipe cache 并返回已有对象。
     def test_craft_hits_recipe_cache(self) -> None:
         fire = self.store.get_object(2)
@@ -135,6 +152,20 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertEqual(summary.total, 1)
         self.assertEqual(summary.exact_id_match, 1)
         self.assertEqual(summary.top5_match, 1)
+        self.assertIn("add:element+element->element", summary.buckets)
+
+    # 测试点：评估报告会记录未精确命中的失败样本，便于后续调参。
+    def test_route_replay_reports_failure_samples(self) -> None:
+        self.store.conn.execute("DELETE FROM recipe_cache")
+        self.store.conn.commit()
+        self.store.rebuild_indexes()
+
+        summary = evaluate_routes(self.store, limit=10, max_failures=5)
+
+        self.assertEqual(summary.total, 1)
+        self.assertLess(summary.exact_id_match, 1)
+        self.assertEqual(len(summary.failures), 1)
+        self.assertEqual(summary.failures[0].expected_name, "水")
 
 
 if __name__ == "__main__":

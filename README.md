@@ -69,8 +69,10 @@ python -B -m mysynth craft --a 2 --b 3396 --operation add --no-persist
 回放评估：
 
 ```bash
-python -B -m mysynth eval --limit 20
+python -B -m mysynth eval --limit 20 --failures 10
 ```
+
+评估输出包含总体命中率、按 `operation/type` 分桶的指标，以及未精确命中的失败样本。
 
 运行全部测试：
 

@@ -25,6 +25,15 @@ class ObjectStore(Protocol):
     def list_objects(self) -> Iterable[SynthObject]:
         ...
 
+    def get_neighbors(self, object_id: ObjectId, limit: int | None = None) -> list[SynthObject]:
+        ...
+
+    def find_edges_by_inputs(self, a_id: ObjectId, b_id: ObjectId, operation: Operation) -> list[RouteEdge]:
+        ...
+
+    def search_by_type_and_tokens(self, synth_type: str, tokens: Iterable[str], limit: int) -> list[SynthObject]:
+        ...
+
     def find_recipe(self, key: RecipeKey) -> SynthObject | None:
         ...
 
@@ -202,6 +211,47 @@ class SQLiteObjectStore:
     def list_objects(self) -> Iterable[SynthObject]:
         return self.objects_by_id.values()
 
+    def get_neighbors(self, object_id: ObjectId, limit: int | None = None) -> list[SynthObject]:
+        neighbor_ids = sorted(self.neighbors_by_object.get(object_id, set()), key=lambda item: str(item))
+        if limit is not None:
+            neighbor_ids = neighbor_ids[:limit]
+        return [self.objects_by_id[item] for item in neighbor_ids if item in self.objects_by_id]
+
+    def find_edges_by_inputs(self, a_id: ObjectId, b_id: ObjectId, operation: Operation) -> list[RouteEdge]:
+        pairs = [(a_id, b_id)]
+        if operation == "add" and a_id != b_id:
+            pairs.append((b_id, a_id))
+        rows: list[sqlite3.Row] = []
+        for left, right in pairs:
+            rows.extend(
+                self.conn.execute(
+                    """
+                    SELECT result_id, operation, a_id, b_id
+                    FROM route_edges
+                    WHERE a_id = ? AND b_id = ? AND operation = ?
+                    ORDER BY id
+                    """,
+                    (left, right, operation),
+                ).fetchall()
+            )
+        return [edge for row in rows if (edge := self._route_edge_from_row(row)) is not None]
+
+    def search_by_type_and_tokens(self, synth_type: str, tokens: Iterable[str], limit: int) -> list[SynthObject]:
+        ids: list[ObjectId] = []
+        seen: set[ObjectId] = set()
+        allowed = self.type_index.get(synth_type, set())
+        normalized_tokens: list[str] = []
+        for token in tokens:
+            normalized_tokens.extend(item.casefold() for item in tokenize(token))
+        for token in normalized_tokens:
+            for object_id in self.token_index.get(token, set()):
+                if object_id in allowed and object_id not in seen and object_id in self.objects_by_id:
+                    seen.add(object_id)
+                    ids.append(object_id)
+                    if len(ids) >= limit:
+                        return [self.objects_by_id[item] for item in ids]
+        return [self.objects_by_id[item] for item in ids]
+
     def find_recipe(self, key: RecipeKey) -> SynthObject | None:
         result_id = self.recipe_index.get(key)
         if result_id is None:
@@ -303,31 +353,29 @@ class SQLiteObjectStore:
             rows = self.conn.execute(sql, (limit,)).fetchall()
         else:
             rows = self.conn.execute(sql).fetchall()
-        result: list[RouteEdge] = []
-        for row in rows:
-            result_obj = self.get_object(int(row["result_id"]))
-            a_obj = self.get_object(int(row["a_id"]))
-            b_obj = self.get_object(int(row["b_id"]))
-            if result_obj is None or a_obj is None or b_obj is None:
-                continue
-            result.append(
-                RouteEdge(
-                    result_id=result_obj.id or int(row["result_id"]),
-                    result_name=result_obj.name,
-                    result_type=result_obj.type,
-                    result_description=result_obj.description,
-                    operation=row["operation"],
-                    a_id=a_obj.id or int(row["a_id"]),
-                    a_name=a_obj.name,
-                    a_type=a_obj.type,
-                    a_description=a_obj.description,
-                    b_id=b_obj.id or int(row["b_id"]),
-                    b_name=b_obj.name,
-                    b_type=b_obj.type,
-                    b_description=b_obj.description,
-                )
-            )
-        return result
+        return [edge for row in rows if (edge := self._route_edge_from_row(row)) is not None]
+
+    def _route_edge_from_row(self, row: sqlite3.Row) -> RouteEdge | None:
+        result_obj = self.get_object(int(row["result_id"]))
+        a_obj = self.get_object(int(row["a_id"]))
+        b_obj = self.get_object(int(row["b_id"]))
+        if result_obj is None or a_obj is None or b_obj is None:
+            return None
+        return RouteEdge(
+            result_id=result_obj.id or int(row["result_id"]),
+            result_name=result_obj.name,
+            result_type=result_obj.type,
+            result_description=result_obj.description,
+            operation=row["operation"],
+            a_id=a_obj.id or int(row["a_id"]),
+            a_name=a_obj.name,
+            a_type=a_obj.type,
+            a_description=a_obj.description,
+            b_id=b_obj.id or int(row["b_id"]),
+            b_name=b_obj.name,
+            b_type=b_obj.type,
+            b_description=b_obj.description,
+        )
 
     def _upsert_object(self, obj: SynthObject, payload: dict) -> None:
         if obj.id is None:
