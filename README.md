@@ -5,12 +5,16 @@
 ## 当前入口
 
 - `docs/design/mysynthesizer-synthesizer-design.md`：合成器机制、正向模型、AI 操作规则的统一设计文档。
+- `docs/design/synthesizer-engine-implementation.md`：Python 后端合成器引擎的数据模型、pipeline、接口和评估设计。
 - `outputs/data/current/`：当前最新可用合成数据。
 
 ## 重要文件
 
 - `docs/design/mysynthesizer-synthesizer-design.md`  
   合并后的权威设计入口，包含机制分析、正向合成流程、匹配/新建判断、type 统计、专名化策略和后续 AI 工作规范。
+
+- `docs/design/synthesizer-engine-implementation.md`  
+  面向最终 Python 后端实现的工程设计入口，定义合成器引擎边界、对象模型、候选生成、检索评分、命中/新建决策和回放评估方法。
 
 - `outputs/data/current/mysynthesizer_mine_full_routes_latest.json`  
   当前最新完整图谱。最近一次刷新为 `1355 objects / 3100 craft_sources`。
@@ -22,8 +26,9 @@
 
 1. 先读本 README。
 2. 如果要理解合成器机制或规划后续合成路线，读 `docs/design/mysynthesizer-synthesizer-design.md`。
-3. 如果要做证据核查，读 `outputs/data/current/mysynthesizer_mine_full_routes_latest.json`。
-4. 如果用户说“又合成了新东西”或要求刷新当前 mine，调用 `mysynthesizer-route-scanner` skill，并用最新 cookie 重新扫描。
+3. 如果要实现本地合成器引擎，读 `docs/design/synthesizer-engine-implementation.md`。
+4. 如果要做证据核查，读 `outputs/data/current/mysynthesizer_mine_full_routes_latest.json`。
+5. 如果用户说“又合成了新东西”或要求刷新当前 mine，调用 `mysynthesizer-route-scanner` skill，并用最新 cookie 重新扫描。
 
 ## 数据整理说明
 
