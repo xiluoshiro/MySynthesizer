@@ -72,11 +72,18 @@ python -B -m mysynth craft --a 2 --b 3396 --operation add --no-persist
 python -B -m mysynth eval --limit 20
 ```
 
+运行全部测试：
+
+```bash
+python -B scripts/run_tests.py
+```
+
 说明：
 
 - 当前 CLI 默认读取 `outputs/data/current/mysynthesizer_mine_full_routes_latest.json`。
 - 当前主存储是 SQLite，不需要外部数据库服务。
 - `--no-persist` 用于只看结果、不写入本地 craft 记录。
+- `scripts/run_tests.py` 是统一测试入口，当前包含语法检查和 `unittest` 发现，后续测试套件继续挂到这里。
 - 在当前 Windows 环境里建议使用 `python -B`，避免写 `__pycache__` 时触发权限问题。
 
 ## 后续新会话建议
