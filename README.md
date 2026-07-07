@@ -11,17 +11,17 @@
 - Python 包结构和核心数据模型。
 - SQLite 本地存储，覆盖对象、原始 payload、路线边、recipe cache、合成事件、失败记录。
 - 第一版规则合成 pipeline：校验、缓存、特征抽取、意图判断、候选生成、召回、评分、决策、持久化。
-- CLI：`init`、`craft`、`eval`、`embed objects`。
+- CLI：`init`、`craft`、`eval`、`embed objects`、`review promote/reject/merge`。
 - 评估与测试看护：根目录 `scripts/run_tests.py` 可一键运行语法检查和单元测试。
 - 向量化基础层：embedding 文本构造、fake provider、SQLite sidecar 表、去重和 stale 标记。
+- 质量治理基础闭环：active-only 在线召回、`created_pending`、`merged_existing`、`object_aliases`、disabled route、pending 的 promote/reject/merge 审核命令。
 
 进行中：
 
-- 质量治理和状态过滤尚未落地，当前本地新对象仍偏原型行为。
 - 真实向量模型、向量库和 LLM 候选生成尚未接入。
-- 邻接路线证据仍需进一步收窄，避免作为宽泛候选扩散来源。
+- 质量治理仍是最小闭环，尚未实现质量评分、审核记录表和批量维护命令。
 
-建议下一步优先实现质量治理最小闭环：对象状态、duplicate/canonical 检查、pending/rejected/merged 隔离，以及 active-only 召回。
+建议下一步进入真实向量检索接口：先定义 `VectorIndex`，再把 object/recipe vector top-k 作为候选证据接入，不能覆盖 `recipe_cache` 的确定结果。
 
 ## 当前入口
 
@@ -102,6 +102,16 @@ python -B -m mysynth embed objects --limit 100
 
 当前 embedding 命令使用确定性的 `fake-hash-v1` provider，只用于验证 embedding schema、去重和 stale 逻辑；真实向量模型和向量库后续接入。
 
+审核 pending 对象：
+
+```bash
+python -B -m mysynth review promote --id -1
+python -B -m mysynth review reject --id -1 --reason bad_name
+python -B -m mysynth review merge --id -1 --canonical-id 1
+```
+
+`promote` 会把 pending 对象、disabled route 和 recipe cache 激活；`reject` 保持对象和路线隔离；`merge` 会把 pending 对象归并到 canonical 对象，并写入 alias、route 和 recipe cache。
+
 运行全部测试：
 
 ```bash
@@ -114,6 +124,7 @@ python -B scripts/run_tests.py
 - 当前主存储是 SQLite，不需要外部数据库服务。
 - `--no-persist` 用于只看结果、不写入本地 craft 记录。
 - `embed objects` 会写入 SQLite 的 embedding sidecar 表，不调用外部模型。
+- 未命中确定结果的新合成默认进入 `pending`，不会参与 active 召回；需要通过 `review` 命令审核。
 - `scripts/run_tests.py` 是统一测试入口，当前包含语法检查和 `unittest` 发现，后续测试套件继续挂到这里。
 - 在当前 Windows 环境里建议使用 `python -B`，避免写 `__pycache__` 时触发权限问题。
 

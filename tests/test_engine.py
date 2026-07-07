@@ -382,6 +382,56 @@ class EngineScenarioTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.promote_pending_object(1)
 
+    # 测试点：reject 会把 pending 对象标记为 rejected，并保持路线和 cache 隔离。
+    def test_reject_pending_object_keeps_route_and_cache_inactive(self) -> None:
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+        result = RuleSynthesizerEngine(self.store).craft(
+            CraftRequest(operation="subtract", ingredient_a=fire, ingredient_b=hydrogen)
+        )
+        pending_id = result.result.id
+        self.assertIsNotNone(pending_id)
+
+        rejected = self.store.reject_pending_object(pending_id, reason="bad_name")
+
+        self.assertEqual(rejected.status, "rejected")
+        self.assertIn("rejected", rejected.quality_flags)
+        self.assertIn("review_reason:bad_name", rejected.quality_flags)
+        self.assertIsNone(self.store.get_object(pending_id))
+        self.assertIsNone(self.store.find_recipe("subtract:2:3"))
+        edges = self.store.find_edges_by_inputs(2, 3, "subtract")
+        self.assertEqual(edges, [])
+
+    # 测试点：merge 会把 pending 对象归并到 canonical，并将路线和 cache 指向 canonical。
+    def test_merge_pending_object_points_route_and_cache_to_canonical(self) -> None:
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        canonical = self.store.get_object(1)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+        self.assertIsNotNone(canonical)
+        result = RuleSynthesizerEngine(self.store).craft(
+            CraftRequest(operation="subtract", ingredient_a=fire, ingredient_b=hydrogen)
+        )
+        pending_id = result.result.id
+        self.assertIsNotNone(pending_id)
+
+        merged = self.store.merge_pending_object(pending_id, canonical.id)
+
+        self.assertEqual(merged.status, "merged")
+        self.assertEqual(merged.canonical_id, canonical.id)
+        self.assertEqual(self.store.get_object(pending_id).id, canonical.id)
+        cached = self.store.find_recipe("subtract:2:3")
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.id, canonical.id)
+        edges = self.store.find_edges_by_inputs(2, 3, "subtract")
+        self.assertEqual([edge.result_id for edge in edges], [canonical.id])
+        alias_row = self.store.conn.execute("SELECT object_id FROM object_aliases WHERE alias = ?", (result.result.name,)).fetchone()
+        self.assertIsNotNone(alias_row)
+        self.assertEqual(alias_row["object_id"], canonical.id)
+
     # 测试点：候选名称与 active 对象归一化一致时会归并到已有 canonical 对象。
     def test_duplicate_candidate_name_merges_existing_object(self) -> None:
         duplicate = SynthObject(

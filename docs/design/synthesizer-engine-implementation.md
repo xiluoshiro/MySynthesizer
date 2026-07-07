@@ -26,7 +26,8 @@
 - [x] 可解释合成结果、失败记录和评估报告。
 - [x] 测试看护脚本：`python -B scripts/run_tests.py`。
 - [~] 向量化基础层已实现到 SQLite sidecar 和 fake provider，真实向量检索后置。
-- [ ] 质量治理、状态过滤、真实 LLM 候选生成、HTTP/API 适配。
+- [x] 质量治理基础闭环：active-only 查询、pending/rejected/merged 隔离、promote/reject/merge 审核命令。
+- [ ] 真实 LLM 候选生成、真实向量检索、HTTP/API 适配。
 
 明确后置：
 
@@ -803,7 +804,7 @@ flowchart TD
 - recipe cache 命中时不会被 vector 相似结果覆盖。
 - vector top-k 命中的 recipe 只能作为候选证据，不能直接返回为确定结果。
 
-### Phase 8：只增图治理与索引维护（未开始，建议下一步）
+### Phase 8：只增图治理与索引维护（已完成基础版，compact/rebuild 后置）
 
 - 主数据采用 append-friendly 策略，不默认物理删除对象和路线。
 - `objects` 增加 `status`：`active / pending / rejected / merged / banned / archived`。
@@ -814,13 +815,22 @@ flowchart TD
   - `rebuild-index`：从 active 数据重建内存索引和向量 side index。
   - `compact`：归档旧 craft_events/failures，清理 stale/deleted embedding。
 
+当前实现状态：
+
+- `objects` 已支持 `status`、`canonical_id`、`quality_flags`。
+- `route_edges` 已支持 `status`，pending 对象对应 route 默认写为 `disabled`。
+- 默认在线对象索引只读取 `active` 且非 banned 对象。
+- 默认 direct route 只读取 `active` route。
+- `merged` 对象会解析到 canonical object。
+- `pending/rejected/merged/banned/archived` 默认不进入 craft 召回。
+
 验收：
 
 - banned/rejected/merged 对象不会进入默认 craft 召回。
 - 评估和审计可通过显式参数读取 inactive 数据。
 - compact 不影响 active recipe cache 命中。
 
-### Phase 9：质量治理与归一化（未开始，建议优先前置实现最小闭环）
+### Phase 9：质量治理与归一化（已完成最小闭环，质量评分后置）
 
 - 新增合成结果状态：
   - `accepted`：可进入 active 图。
@@ -834,6 +844,19 @@ flowchart TD
   - `canonical_groups(group_id, canonical_object_id)`
 - 入库前增加 duplicate/canonical check。
 - 默认新对象先进入 `pending`，只有通过质量门槛或人工确认才进入 active 图。
+
+当前实现状态：
+
+- 非确定新结果默认返回 `created_pending`，并写入 pending 对象。
+- pending 对象不进入 active 召回，相关 route 为 `disabled`，不写 active `recipe_cache`。
+- 候选名称与 active 对象归一化一致时返回 `merged_existing`，写入 `object_aliases`，route/cache 指向 canonical。
+- 已提供审核命令：
+  - `python -B -m mysynth review promote --id <pending_id>`
+  - `python -B -m mysynth review reject --id <pending_id> --reason <reason>`
+  - `python -B -m mysynth review merge --id <pending_id> --canonical-id <active_id>`
+- `promote`：pending -> active，激活 disabled route，补写 recipe cache。
+- `reject`：pending -> rejected，保留隔离，删除相关 recipe cache。
+- `merge`：pending -> merged，写 canonical_id 和 alias，把 route/cache 指向 canonical。
 
 坏结果分类：
 
@@ -852,8 +875,8 @@ flowchart TD
 
 当前建议：
 
-- 质量治理应提前到真实 LLM/真实向量检索之前做最小版本，避免低质量或重复对象污染 active 图。
-- 最小版本至少包括对象 `status`、`canonical_id`、`quality_flags`、duplicate/canonical check、active-only 召回。
+- 当前质量治理已能阻止 pending/rejected/merged 污染 active 图。
+- 后续质量治理应补充 `quality_reviews` 审核记录表、批量审核/回滚命令和更细的 duplicate/canonical 检查。
 
 ### Phase 10：API 兼容层（未开始）
 
@@ -962,8 +985,8 @@ generate candidates
 | Phase 5 | 向量化基础 | embedding 去重率、stale 检测、任务失败率 |
 | Phase 6 | LLM 候选 | schema 合格率、fallback 率、candidate hit |
 | Phase 7 | 混合检索 | vector top-k hit、hybrid top5 hit、错误分布 |
-| Phase 8 | 只增图治理 | active index 大小、compact 后一致性、inactive 泄漏数 |
-| Phase 9 | 质量治理 | pending/rejected/merged 比例、重复对象下降率 |
+| Phase 8 | 只增图治理 | active index 大小、inactive 泄漏数、disabled route 隔离 |
+| Phase 9 | 质量治理 | pending/rejected/merged 比例、promote/reject/merge 一致性 |
 | Phase 10 | API 兼容 | 线上响应兼容率、错误返回稳定性 |
 
 ## 9. 与现有设计文档的关系

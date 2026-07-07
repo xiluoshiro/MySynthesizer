@@ -455,6 +455,65 @@ class SQLiteObjectStore:
             raise RuntimeError(f"promoted object is not visible online: {object_id}")
         return result
 
+    def reject_pending_object(self, object_id: ObjectId, reason: str | None = None) -> SynthObject:
+        obj = self.all_objects_by_id.get(object_id)
+        if obj is None:
+            raise ValueError(f"object not found: {object_id}")
+        if obj.status != "pending":
+            raise ValueError(f"object is not pending: {object_id}")
+
+        flags = list(dict.fromkeys([*obj.quality_flags, "rejected", *(["review_reason:" + reason] if reason else [])]))
+        rejected = obj.model_copy(update={"status": "rejected", "quality_flags": flags})
+        with self.conn:
+            self._upsert_object(rejected, rejected.model_dump(mode="json"))
+            self.conn.execute("UPDATE route_edges SET status = 'disabled' WHERE result_id = ?", (object_id,))
+            self.conn.execute("DELETE FROM recipe_cache WHERE result_id = ?", (object_id,))
+        self.rebuild_indexes()
+        return self.all_objects_by_id[object_id]
+
+    def merge_pending_object(self, object_id: ObjectId, canonical_id: ObjectId) -> SynthObject:
+        obj = self.all_objects_by_id.get(object_id)
+        canonical = self.get_object(canonical_id)
+        if obj is None:
+            raise ValueError(f"object not found: {object_id}")
+        if obj.status != "pending":
+            raise ValueError(f"object is not pending: {object_id}")
+        if canonical is None:
+            raise ValueError(f"canonical object is not active: {canonical_id}")
+
+        merged = obj.model_copy(update={"status": "merged", "canonical_id": canonical.id, "quality_flags": ["merged"]})
+        now = _utc_now()
+        with self.conn:
+            self._upsert_object(merged, merged.model_dump(mode="json"))
+            self._insert_object_alias(obj.name, canonical.id, source="review")
+            rows = self.conn.execute(
+                """
+                SELECT a_id, b_id, operation
+                FROM route_edges
+                WHERE result_id = ?
+                """,
+                (object_id,),
+            ).fetchall()
+            self.conn.execute(
+                """
+                UPDATE route_edges
+                SET result_id = ?, status = 'active'
+                WHERE result_id = ?
+                """,
+                (canonical.id, object_id),
+            )
+            for row in rows:
+                key = recipe_key(int(row["a_id"]), int(row["b_id"]), row["operation"])
+                self.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO recipe_cache(recipe_key, a_id, b_id, operation, result_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (key, row["a_id"], row["b_id"], row["operation"], canonical.id, now),
+                )
+        self.rebuild_indexes()
+        return self.all_objects_by_id[object_id]
+
     def next_local_id(self) -> int:
         row = self.conn.execute("SELECT MIN(id) AS min_id FROM objects").fetchone()
         min_id = row["min_id"]

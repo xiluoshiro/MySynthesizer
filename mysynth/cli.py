@@ -39,6 +39,12 @@ def main() -> None:
     review_subparsers = review_parser.add_subparsers(dest="review_command", required=True)
     promote_parser = review_subparsers.add_parser("promote")
     promote_parser.add_argument("--id", type=int, required=True)
+    reject_parser = review_subparsers.add_parser("reject")
+    reject_parser.add_argument("--id", type=int, required=True)
+    reject_parser.add_argument("--reason")
+    merge_parser = review_subparsers.add_parser("merge")
+    merge_parser.add_argument("--id", type=int, required=True)
+    merge_parser.add_argument("--canonical-id", type=int, required=True)
 
     embed_parser = subparsers.add_parser("embed")
     embed_subparsers = embed_parser.add_subparsers(dest="embed_command", required=True)
@@ -72,6 +78,30 @@ def main() -> None:
                         {
                             "ok": True,
                             "object": promoted.model_dump(mode="json"),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            elif args.review_command == "reject":
+                rejected = store.reject_pending_object(args.id, reason=args.reason)
+                print(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "object": rejected.model_dump(mode="json"),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            elif args.review_command == "merge":
+                merged = store.merge_pending_object(args.id, args.canonical_id)
+                print(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "object": merged.model_dump(mode="json"),
                         },
                         ensure_ascii=False,
                         indent=2,
