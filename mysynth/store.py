@@ -55,6 +55,7 @@ class SQLiteObjectStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
+        self.all_objects_by_id: dict[ObjectId, SynthObject] = {}
         self.objects_by_id: dict[ObjectId, SynthObject] = {}
         self.name_index: dict[str, set[ObjectId]] = defaultdict(set)
         self.token_index: dict[str, set[ObjectId]] = defaultdict(set)
@@ -87,6 +88,9 @@ class SQLiteObjectStore:
                 description TEXT,
                 source TEXT,
                 is_banned INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                canonical_id INTEGER,
+                quality_flags TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT,
                 discovered_at TEXT
             );
@@ -103,6 +107,7 @@ class SQLiteObjectStore:
                 operation TEXT NOT NULL,
                 result_id INTEGER NOT NULL,
                 source TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
                 UNIQUE(a_id, b_id, operation, result_id)
             );
 
@@ -162,7 +167,19 @@ class SQLiteObjectStore:
             CREATE INDEX IF NOT EXISTS idx_embeddings_hash ON embeddings(text_hash, model, status);
             """
         )
+        self._ensure_schema_columns()
         self.conn.commit()
+
+    def _ensure_schema_columns(self) -> None:
+        self._ensure_column("objects", "status", "ALTER TABLE objects ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+        self._ensure_column("objects", "canonical_id", "ALTER TABLE objects ADD COLUMN canonical_id INTEGER")
+        self._ensure_column("objects", "quality_flags", "ALTER TABLE objects ADD COLUMN quality_flags TEXT NOT NULL DEFAULT '[]'")
+        self._ensure_column("route_edges", "status", "ALTER TABLE route_edges ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+
+    def _ensure_column(self, table: str, column: str, sql: str) -> None:
+        columns = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            self.conn.execute(sql)
 
     def _object_count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS count FROM objects").fetchone()
@@ -192,6 +209,7 @@ class SQLiteObjectStore:
 
     def rebuild_indexes(self) -> None:
         # 从 SQLite 重建在线索引，后续 status 过滤也应放在这里。
+        self.all_objects_by_id.clear()
         self.objects_by_id.clear()
         self.name_index.clear()
         self.token_index.clear()
@@ -201,14 +219,17 @@ class SQLiteObjectStore:
 
         rows = self.conn.execute(
             """
-            SELECT object_payloads.payload_json
+            SELECT object_payloads.payload_json, objects.status, objects.canonical_id, objects.quality_flags
             FROM objects
             JOIN object_payloads ON object_payloads.object_id = objects.id
             """
         ).fetchall()
         for row in rows:
-            obj = SynthObject.model_validate_json(row["payload_json"])
+            obj = self._object_from_row(row)
             if obj.id is None:
+                continue
+            self.all_objects_by_id[obj.id] = obj
+            if not self._is_online_object(obj):
                 continue
             self.objects_by_id[obj.id] = obj
             self.name_index[normalize_name(obj.name)].add(obj.id)
@@ -218,11 +239,14 @@ class SQLiteObjectStore:
 
         recipe_rows = self.conn.execute("SELECT recipe_key, result_id FROM recipe_cache").fetchall()
         for row in recipe_rows:
-            self.recipe_index[row["recipe_key"]] = row["result_id"]
+            if self.get_object(int(row["result_id"])) is not None:
+                self.recipe_index[row["recipe_key"]] = row["result_id"]
 
-        edge_rows = self.conn.execute("SELECT a_id, b_id, result_id FROM route_edges").fetchall()
+        edge_rows = self.conn.execute("SELECT result_id, operation, a_id, b_id FROM route_edges WHERE status = 'active'").fetchall()
         for row in edge_rows:
             # 邻接只用于诊断和受限路线证据，不做宽泛候选扩散。
+            if self._route_edge_from_row(row) is None:
+                continue
             a_id = int(row["a_id"])
             b_id = int(row["b_id"])
             result_id = int(row["result_id"])
@@ -231,7 +255,14 @@ class SQLiteObjectStore:
             self.neighbors_by_object[result_id].update({a_id, b_id})
 
     def get_object(self, object_id: ObjectId) -> SynthObject | None:
-        return self.objects_by_id.get(object_id)
+        obj = self.all_objects_by_id.get(object_id)
+        if obj is None:
+            return None
+        if obj.status == "merged" and obj.canonical_id is not None:
+            return self.get_object(obj.canonical_id)
+        if self._is_online_object(obj):
+            return obj
+        return None
 
     def get_by_name(self, name: str) -> list[SynthObject]:
         ids = self.name_index.get(normalize_name(name), set())
@@ -258,7 +289,7 @@ class SQLiteObjectStore:
                     """
                     SELECT result_id, operation, a_id, b_id
                     FROM route_edges
-                    WHERE a_id = ? AND b_id = ? AND operation = ?
+                    WHERE a_id = ? AND b_id = ? AND operation = ? AND status = 'active'
                     ORDER BY id
                     """,
                     (left, right, operation),
@@ -287,7 +318,7 @@ class SQLiteObjectStore:
         result_id = self.recipe_index.get(key)
         if result_id is None:
             return None
-        return self.objects_by_id.get(result_id)
+        return self.get_object(result_id)
 
     def search_candidates(self, candidate: CandidateObject, limit: int) -> list[SynthObject]:
         ids: list[ObjectId] = []
@@ -380,6 +411,7 @@ class SQLiteObjectStore:
         sql = """
             SELECT result_id, operation, a_id, b_id
             FROM route_edges
+            WHERE status = 'active'
             ORDER BY id
         """
         if limit is not None:
@@ -448,15 +480,25 @@ class SQLiteObjectStore:
             """,
             (obj.id, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
         )
+        self.conn.execute(
+            """
+            UPDATE objects
+            SET status = ?, canonical_id = ?, quality_flags = ?
+            WHERE id = ?
+            """,
+            (obj.status, obj.canonical_id, json.dumps(obj.quality_flags, ensure_ascii=False, separators=(",", ":")), obj.id),
+        )
 
     def _insert_route_edge(self, edge: RouteEdge, source: str) -> None:
         self.conn.execute(
             """
-            INSERT OR IGNORE INTO route_edges(a_id, b_id, operation, result_id, source)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO route_edges(a_id, b_id, operation, result_id, source, status)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (edge.a_id, edge.b_id, edge.operation, edge.result_id, source),
+            (edge.a_id, edge.b_id, edge.operation, edge.result_id, source, edge.status),
         )
+        if edge.status != "active":
+            return
         key = recipe_key(edge.a_id, edge.b_id, edge.operation)
         self.conn.execute(
             """
@@ -465,6 +507,17 @@ class SQLiteObjectStore:
             """,
             (key, edge.a_id, edge.b_id, edge.operation, edge.result_id, _utc_now()),
         )
+
+    def _object_from_row(self, row: sqlite3.Row) -> SynthObject:
+        payload = json.loads(row["payload_json"])
+        payload["status"] = row["status"] or payload.get("status", "active")
+        payload["canonical_id"] = row["canonical_id"]
+        raw_flags = row["quality_flags"] or "[]"
+        payload["quality_flags"] = json.loads(raw_flags)
+        return SynthObject.model_validate(payload)
+
+    def _is_online_object(self, obj: SynthObject) -> bool:
+        return obj.status == "active" and not obj.is_banned
 
 
 def _utc_now() -> str:

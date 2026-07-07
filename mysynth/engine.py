@@ -38,6 +38,22 @@ class RuleSynthesizerEngine:
                     explanation=f"recipe cache 命中：{request.ingredient_a.name} {request.operation} {request.ingredient_b.name} -> {cached.name}",
                 )
                 return result
+            direct_result = self._direct_route_result(request)
+            if direct_result is not None:
+                result = CraftResult(
+                    success=True,
+                    result=self._result_object(direct_result),
+                    decision="matched_existing",
+                    cached=False,
+                    matched_object_id=direct_result.id,
+                    explanation=(
+                        f"direct route 命中：{request.ingredient_a.name} {request.operation} "
+                        f"{request.ingredient_b.name} -> {direct_result.name}"
+                    ),
+                )
+                if request.options.persist:
+                    self.store.save_craft_result(request, result)
+                return result
 
         a_features = extract_features(request.ingredient_a)
         b_features = extract_features(request.ingredient_b)
@@ -99,6 +115,8 @@ class RuleSynthesizerEngine:
             return "ingredient name cannot be empty"
         if not request.options.allow_banned and (request.ingredient_a.is_banned or request.ingredient_b.is_banned):
             return "banned ingredients are not allowed"
+        if request.ingredient_a.status != "active" or request.ingredient_b.status != "active":
+            return "inactive ingredients are not allowed"
         return None
 
     def _rank_candidates(
@@ -133,33 +151,25 @@ class RuleSynthesizerEngine:
                     seen.add(value.id)
                     objects.append(value)
 
-        # 混合召回：候选文本、受限图证据、type/token 兜底。
+        # 混合召回：候选文本和 type/token 兜底；不做单边邻接扩散。
         add_many(self.store.search_candidates(candidate, request.options.max_retrieved))
-        if request.ingredient_a.id is not None:
-            add_many(self.store.get_neighbors(request.ingredient_a.id, limit=20))
-        if request.ingredient_b.id is not None:
-            add_many(self.store.get_neighbors(request.ingredient_b.id, limit=20))
-        if request.ingredient_a.id is not None and request.ingredient_b.id is not None:
-            direct_edges = self.store.find_edges_by_inputs(
-                request.ingredient_a.id,
-                request.ingredient_b.id,
-                request.operation,
-            )
-            add_many([obj for edge in direct_edges if (obj := self.store.get_object(edge.result_id)) is not None])
         add_many(self.store.search_by_type_and_tokens(candidate.type, candidate.core_tags, limit=20))
         return objects[: request.options.max_retrieved]
 
     def _route_prior(self, request: CraftRequest, object_id: int | None) -> float:
-        if object_id is None:
-            return 0.0
-        # route 加分保持较弱，避免图邻近压过语义冲突。
-        a_neighbors = getattr(self.store, "neighbors_by_object", {}).get(request.ingredient_a.id, set())
-        b_neighbors = getattr(self.store, "neighbors_by_object", {}).get(request.ingredient_b.id, set())
-        if object_id in a_neighbors and object_id in b_neighbors:
-            return 0.10
-        if object_id in a_neighbors or object_id in b_neighbors:
-            return 0.05
         return 0.0
+
+    def _direct_route_result(self, request: CraftRequest) -> SynthObject | None:
+        a_id = request.ingredient_a.id
+        b_id = request.ingredient_b.id
+        if a_id is None or b_id is None:
+            return None
+        edges = self.store.find_edges_by_inputs(a_id, b_id, request.operation)
+        for edge in edges:
+            result = self.store.get_object(edge.result_id)
+            if result is not None:
+                return result
+        return None
 
     def _construct_new_object(self, candidate: CandidateObject) -> SynthObject:
         now = datetime.now(UTC).isoformat()

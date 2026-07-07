@@ -7,7 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 SynthType = Literal["element", "item", "equipment", "creature", "concept"]
 Operation = Literal["add", "subtract"]
-Decision = Literal["matched_existing", "created_new", "failed"]
+Decision = Literal["matched_existing", "created_new", "failed", "merged_existing", "created_pending", "rejected"]
+ObjectStatus = Literal["active", "pending", "rejected", "merged", "banned", "archived"]
+RouteEdgeStatus = Literal["active", "disabled"]
 ObjectId = int
 
 
@@ -35,6 +37,9 @@ class SynthObject(BaseModel):
     discovery_method: str | None = None
     is_first_discoverer: bool = False
     category_ids: list[int] = Field(default_factory=list)
+    status: ObjectStatus = "active"
+    canonical_id: ObjectId | None = None
+    quality_flags: list[str] = Field(default_factory=list)
 
 
 class CraftOptions(BaseModel):
@@ -111,6 +116,7 @@ class RouteEdge(BaseModel):
     b_name: str | None = None
     b_type: SynthType | None = None
     b_description: str | None = None
+    status: RouteEdgeStatus = "active"
 
 
 JsonDict = dict[str, Any]

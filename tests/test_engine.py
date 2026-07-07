@@ -14,7 +14,7 @@ from mysynth.embeddings import (
 )
 from mysynth.engine import RuleSynthesizerEngine
 from mysynth.evaluation import evaluate_routes
-from mysynth.models import CraftOptions, CraftRequest
+from mysynth.models import CandidateObject, CraftOptions, CraftRequest
 from mysynth.store import SQLiteObjectStore
 
 
@@ -48,6 +48,54 @@ def _write_graph(path: Path) -> None:
                 "source": "llm",
                 "category_ids": [],
             },
+            {
+                "id": 4,
+                "name": "石头",
+                "emoji": "🪨",
+                "type": "item",
+                "description": "坚硬、稳定的普通物体。",
+                "source": "llm",
+                "category_ids": [],
+            },
+            {
+                "id": 5,
+                "name": "火蜥蜴",
+                "emoji": "🦎",
+                "type": "creature",
+                "description": "只用于验证单边邻接噪声的生物。",
+                "source": "llm",
+                "category_ids": [],
+            },
+            {
+                "id": 6,
+                "name": "待定水",
+                "emoji": "💧",
+                "type": "element",
+                "description": "特殊待定对象，不应进入默认在线召回。",
+                "source": "local_engine",
+                "category_ids": [],
+                "status": "pending",
+            },
+            {
+                "id": 8,
+                "name": "标准水",
+                "emoji": "💧",
+                "type": "element",
+                "description": "canonical 对象，用于验证 merged 解析。",
+                "source": "local_engine",
+                "category_ids": [],
+            },
+            {
+                "id": 9,
+                "name": "旧水",
+                "emoji": "💧",
+                "type": "element",
+                "description": "已归并对象，不应直接作为结果返回。",
+                "source": "local_engine",
+                "category_ids": [],
+                "status": "merged",
+                "canonical_id": 8,
+            },
         ],
         "route_edges": [
             {
@@ -64,6 +112,21 @@ def _write_graph(path: Path) -> None:
                 "b_name": "氢气",
                 "b_type": "element",
                 "b_description": "可燃气体，可作为清洁能源。",
+            },
+            {
+                "result_id": 5,
+                "result_name": "火蜥蜴",
+                "result_type": "creature",
+                "result_description": "只用于验证单边邻接噪声的生物。",
+                "operation": "add",
+                "a_id": 2,
+                "a_name": "火",
+                "a_type": "element",
+                "a_description": "燃烧、热量与转化的基础元素。",
+                "b_id": 4,
+                "b_name": "石头",
+                "b_type": "item",
+                "b_description": "坚硬、稳定的普通物体。",
             }
         ],
     }
@@ -94,7 +157,7 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertIsNotNone(cached)
         self.assertEqual(cached.name, "水")
 
-    # 测试点：store 能用无序 add 输入查询路线并返回输入邻接对象。
+    # 测试点：store 能用无序 add 输入查询 active 路线并返回输入邻接对象。
     def test_store_queries_edges_and_neighbors(self) -> None:
         edges = self.store.find_edges_by_inputs(3, 2, "add")
         self.assertEqual(len(edges), 1)
@@ -110,6 +173,43 @@ class EngineScenarioTests(unittest.TestCase):
         names = {obj.name for obj in matches}
         self.assertIn("火", names)
         self.assertIn("氢气", names)
+
+    # 测试点：默认在线视图会隔离 pending 对象，避免进入查询和召回。
+    def test_store_filters_inactive_objects_from_online_view(self) -> None:
+        self.assertIsNone(self.store.get_object(6))
+        self.assertEqual(self.store.get_by_name("待定水"), [])
+
+        matches = self.store.search_by_type_and_tokens("element", ["特殊待定"], limit=10)
+        self.assertNotIn("待定水", {obj.name for obj in matches})
+
+    # 测试点：recipe cache 指向 merged 对象时会解析到 canonical 对象。
+    def test_recipe_cache_resolves_merged_result_to_canonical(self) -> None:
+        self.store.conn.execute("UPDATE recipe_cache SET result_id = 9 WHERE recipe_key = 'add:2:3'")
+        self.store.conn.commit()
+        self.store.rebuild_indexes()
+
+        cached = self.store.find_recipe("add:2:3")
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.id, 8)
+        self.assertEqual(cached.name, "标准水")
+
+    # 测试点：recipe cache 指向 pending 对象时不会作为确定结果返回。
+    def test_recipe_cache_ignores_pending_result(self) -> None:
+        self.store.conn.execute("UPDATE recipe_cache SET result_id = 6 WHERE recipe_key = 'add:2:3'")
+        self.store.conn.commit()
+        self.store.rebuild_indexes()
+
+        self.assertIsNone(self.store.find_recipe("add:2:3"))
+
+    # 测试点：disabled 路线不会进入默认直接路线证据。
+    def test_disabled_route_edges_are_filtered_from_direct_evidence(self) -> None:
+        self.store.conn.execute("UPDATE route_edges SET status = 'disabled' WHERE a_id = 2 AND b_id = 3")
+        self.store.conn.commit()
+        self.store.rebuild_indexes()
+
+        edges = self.store.find_edges_by_inputs(2, 3, "add")
+
+        self.assertEqual(edges, [])
 
     # 测试点：已有路线的合成会优先命中 recipe cache 并返回已有对象。
     def test_craft_hits_recipe_cache(self) -> None:
@@ -131,6 +231,82 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertTrue(result.cached)
         self.assertEqual(result.decision, "matched_existing")
         self.assertEqual(result.result.name, "水")
+
+    # 测试点：recipe cache 命中优先于冲突的直接路线证据。
+    def test_recipe_cache_wins_over_conflicting_route_edge(self) -> None:
+        self.store.conn.execute(
+            """
+            INSERT INTO route_edges(a_id, b_id, operation, result_id, source, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (2, 3, "add", 5, "test", "active"),
+        )
+        self.store.conn.commit()
+        self.store.rebuild_indexes()
+
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+
+        result = RuleSynthesizerEngine(self.store).craft(
+            CraftRequest(
+                operation="add",
+                ingredient_a=fire,
+                ingredient_b=hydrogen,
+                options=CraftOptions(persist=False),
+            )
+        )
+
+        self.assertTrue(result.cached)
+        self.assertEqual(result.result.id, 1)
+
+    # 测试点：recipe cache 缺失时，直接输入边可作为确定结果并修复 cache。
+    def test_direct_route_hit_repairs_missing_recipe_cache(self) -> None:
+        self.store.conn.execute("DELETE FROM recipe_cache WHERE recipe_key = 'add:2:3'")
+        self.store.conn.commit()
+        self.store.rebuild_indexes()
+
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+
+        result = RuleSynthesizerEngine(self.store).craft(
+            CraftRequest(operation="add", ingredient_a=fire, ingredient_b=hydrogen)
+        )
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.cached)
+        self.assertEqual(result.result.id, 1)
+        self.assertIn("direct route 命中", result.explanation)
+        self.assertIsNotNone(self.store.find_recipe("add:2:3"))
+
+    # 测试点：候选召回不使用单边邻接，避免无关邻居进入候选池。
+    def test_retrieval_does_not_expand_single_side_neighbors(self) -> None:
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+        candidate = CandidateObject(
+            name="zz_unique_candidate",
+            type="concept",
+            description="zz_unique_candidate",
+            core_tags=["zz_unique_candidate"],
+            source_reason="test",
+        )
+
+        retrieved = RuleSynthesizerEngine(self.store)._retrieve_for_candidate(
+            candidate,
+            CraftRequest(
+                operation="subtract",
+                ingredient_a=fire,
+                ingredient_b=hydrogen,
+                options=CraftOptions(persist=False),
+            ),
+        )
+
+        self.assertNotIn(5, {obj.id for obj in retrieved})
 
     # 测试点：未命中缓存且禁用持久化时会生成本地候选但不写入 SQLite。
     def test_uncached_no_persist_creates_transient_candidate(self) -> None:
@@ -155,24 +331,23 @@ class EngineScenarioTests(unittest.TestCase):
 
     # 测试点：回放评估会把 recipe cache 命中计入 exact 和 top5 指标。
     def test_route_replay_counts_cache_hits(self) -> None:
-        summary = evaluate_routes(self.store, limit=10)
+        summary = evaluate_routes(self.store, limit=1)
         self.assertEqual(summary.total, 1)
         self.assertEqual(summary.exact_id_match, 1)
         self.assertEqual(summary.top5_match, 1)
         self.assertIn("add:element+element->element", summary.buckets)
 
-    # 测试点：评估报告会记录未精确命中的失败样本，便于后续调参。
-    def test_route_replay_reports_failure_samples(self) -> None:
+    # 测试点：回放评估在 cache 缺失时仍可通过 direct route 命中。
+    def test_route_replay_counts_direct_route_hits_when_cache_missing(self) -> None:
         self.store.conn.execute("DELETE FROM recipe_cache")
         self.store.conn.commit()
         self.store.rebuild_indexes()
 
-        summary = evaluate_routes(self.store, limit=10, max_failures=5)
+        summary = evaluate_routes(self.store, limit=1, max_failures=5)
 
         self.assertEqual(summary.total, 1)
-        self.assertLess(summary.exact_id_match, 1)
-        self.assertEqual(len(summary.failures), 1)
-        self.assertEqual(summary.failures[0].expected_name, "水")
+        self.assertEqual(summary.exact_id_match, 1)
+        self.assertEqual(len(summary.failures), 0)
 
     # 测试点：同一对象文本和模型重复生成 embedding 时会复用已有 active 记录。
     def test_embedding_store_deduplicates_same_text(self) -> None:
