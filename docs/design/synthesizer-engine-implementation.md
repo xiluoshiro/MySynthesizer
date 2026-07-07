@@ -29,8 +29,8 @@
 - [x] 向量化实验层已实现到 SQLite sidecar、fake provider 和本地 vector top-k 召回，默认不进入 craft 主链路。
 - [x] 质量治理基础闭环：active-only 查询、pending/rejected/merged 隔离、promote/reject/merge 审核命令。
 - [x] 本地 workbench：exe 内可托管的 loopback 小服务 + `ui/` 静态页面。
-- [x] PyInstaller dry-run 打包入口。
-- [ ] workbench 交互打磨、PyInstaller 实际构建验收。
+- [x] PyInstaller 打包入口和真实构建验收。
+- [ ] workbench 批量操作、筛选排序、审核记录和桌面窗口壳。
 
 明确后置：
 
@@ -919,14 +919,15 @@ flowchart TD
 - UI 第一版支持搜索对象、查看对象详情、选择 A/B、选择 add/subtract、执行 craft、展示 result/decision/explanation/top_matches。
 - UI 第一版支持 pending 的 promote/reject/merge。
 - 提供 `scripts/build_desktop.py --dry-run` 输出打包计划。
-- 后续用 PyInstaller 输出 `dist/MySynthesizer/MySynthesizer.exe`，并带上 `data/` 和 `ui/`。
+- 提供 `scripts/build_desktop.py` 用 PyInstaller 输出 `dist/MySynthesizer/MySynthesizer.exe`，并带上 exe 同级 `data/` 和 `ui/`。
 
 当前实现状态：
 
 - 已新增 `/api/objects/{id}` 本地详情接口，供 UI 展示对象稳定字段。
 - craft 结果已从纯 JSON 输出改为结构化摘要、解释、top matches 和可展开原始结果。
 - `workbench` 使用单线程 `HTTPServer`，避免 SQLite 连接跨线程导致请求断开。
-- 当前环境未安装 PyInstaller，真实 exe 构建尚未执行；dry-run 和入口检查已通过。
+- 已完成真实 PyInstaller 构建验收：`dist/MySynthesizer/MySynthesizer.exe` 可启动，页面、对象详情和 craft 接口均返回 200。
+- 打包脚本会在 PyInstaller onedir 输出后复制 `ui/` 和 `data/engine` 到 exe 同级，避免运行时依赖开发目录。
 
 验收：
 
@@ -934,7 +935,7 @@ flowchart TD
 - 本地 workbench HTTP 搜索和对象详情接口可访问。
 - UI 调用的本地接口不绕过 engine 和 store。
 - dry-run 能检查打包入口、UI 目录和数据目录。
-- 实际 PyInstaller 构建后能用同一份 SQLite 数据启动。
+- 实际 PyInstaller 构建后能用 exe 同级 SQLite 数据启动。
 
 ## 8.1 单机规模与向量化建议
 
@@ -1036,7 +1037,7 @@ generate candidates
 | Phase 7 | 混合检索（后置实验） | text recall hit、可选 vector top-k hit、错误分布 |
 | Phase 8 | 只增图治理 | active index 大小、inactive 泄漏数、disabled route 隔离 |
 | Phase 9 | 质量治理 | pending/rejected/merged 比例、promote/reject/merge 一致性 |
-| Phase 10 | 本地工作台与打包 | workbench craft 成功、UI 基本流程、dry-run/构建入口检查 |
+| Phase 10 | 本地工作台与打包 | workbench craft 成功、UI 基本流程、dry-run/真实构建/exe 探活 |
 
 ## 9. 与现有设计文档的关系
 

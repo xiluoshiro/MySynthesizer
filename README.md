@@ -16,16 +16,15 @@
 - 向量化实验层：embedding 文本构造、fake provider、SQLite sidecar 表、去重、stale 标记、本地 vector top-k 召回；默认不参与 craft。
 - 质量治理基础闭环：active-only 在线召回、`created_pending`、`merged_existing`、`object_aliases`、disabled route、pending 的 promote/reject/merge 审核命令。
 - 本地 workbench：标准库 loopback HTTP + `ui/` 静态页面，可搜索对象、查看对象详情、执行合成、结构化展示结果和审核 pending。
-- PyInstaller dry-run 打包脚本：`scripts/build_desktop.py --dry-run`。
+- PyInstaller 打包脚本：`scripts/build_desktop.py`，已验证真实构建输出 `dist/MySynthesizer/`。
 
 进行中：
 
 - 单机 UI 仍是第一版，尚未做批量操作、筛选排序和更完整的审核工作流。
-- 完整 exe 打包验收尚未完成；当前环境未安装 PyInstaller。
 - 质量治理仍是最小闭环，尚未实现质量评分、审核记录表和批量维护命令。
 - 真实向量模型、ANN 向量库和 LLM 候选生成已降级为远期实验，不是近期主线。
 
-建议下一步是补 PyInstaller 依赖并做真实 exe 构建验收，然后继续完善 pending 审核记录和批量治理。
+建议下一步是继续完善 pending 审核记录和批量治理，并考虑给 exe 增加托盘/窗口壳。
 
 ## 当前入口
 
@@ -142,6 +141,22 @@ python -B scripts/run_tests.py
 
 ```bash
 python -B scripts/build_desktop.py --dry-run
+```
+
+构建桌面包：
+
+```bash
+python -B scripts/build_desktop.py
+```
+
+构建后输出：
+
+```text
+dist/MySynthesizer/
+  MySynthesizer.exe
+  data/engine/mysynth.db
+  ui/
+  _internal/
 ```
 
 说明：

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import sys
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -16,7 +17,10 @@ from .store import SQLiteObjectStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_UI_DIR = ROOT / "ui"
+APP_BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else ROOT
+DEFAULT_UI_DIR = APP_BASE_DIR / "ui"
+DEFAULT_DB_PATH = APP_BASE_DIR / "data" / "engine" / "mysynth.db"
+DEFAULT_SOURCE_PATH = APP_BASE_DIR / "outputs" / "data" / "current" / "mysynthesizer_mine_full_routes_latest.json"
 
 
 class WorkbenchService:
@@ -91,8 +95,8 @@ def run_workbench(
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="mysynth-workbench")
-    parser.add_argument("--db", default="data/engine/mysynth.db")
-    parser.add_argument("--source", default="outputs/data/current/mysynthesizer_mine_full_routes_latest.json")
+    parser.add_argument("--db", default=str(DEFAULT_DB_PATH))
+    parser.add_argument("--source", default=str(DEFAULT_SOURCE_PATH))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--ui-dir", default=str(DEFAULT_UI_DIR))

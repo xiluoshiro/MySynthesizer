@@ -26,6 +26,8 @@ def main() -> int:
         "dist": str(DIST_DIR),
         "ui": str(ROOT / "ui"),
         "data": str(ROOT / "data" / "engine" / "mysynth.db"),
+        "runtime_ui": str(DIST_DIR / "ui"),
+        "runtime_data": str(DIST_DIR / "data" / "engine"),
         "requires_pyinstaller": True,
     }
     if args.dry_run:
@@ -47,13 +49,19 @@ def main() -> int:
         "--noconfirm",
         "--name",
         args.name,
+        "--paths",
+        str(ROOT),
         "--add-data",
         f"{ROOT / 'ui'}{os.pathsep}ui",
         "--add-data",
         f"{ROOT / 'data' / 'engine'}{os.pathsep}data/engine",
         str(ENTRY_SCRIPT),
     ]
-    return subprocess.run(command, cwd=ROOT, check=False).returncode
+    completed = subprocess.run(command, cwd=ROOT, check=False)
+    if completed.returncode != 0:
+        return completed.returncode
+    _copy_runtime_assets()
+    return 0
 
 
 def _pyinstaller_command() -> list[str] | None:
@@ -63,6 +71,11 @@ def _pyinstaller_command() -> list[str] | None:
     if importlib.util.find_spec("PyInstaller") is not None:
         return [sys.executable, "-m", "PyInstaller"]
     return None
+
+
+def _copy_runtime_assets() -> None:
+    shutil.copytree(ROOT / "ui", DIST_DIR / "ui", dirs_exist_ok=True)
+    shutil.copytree(ROOT / "data" / "engine", DIST_DIR / "data" / "engine", dirs_exist_ok=True)
 
 
 if __name__ == "__main__":
