@@ -4,6 +4,12 @@ import argparse
 import json
 from pathlib import Path
 
+from .embeddings import (
+    EMBEDDING_STATUS_ACTIVE,
+    FakeEmbeddingProvider,
+    SQLiteEmbeddingStore,
+    build_object_embedding_text,
+)
 from .engine import RuleSynthesizerEngine
 from .evaluation import evaluate_routes
 from .models import CraftRequest
@@ -29,6 +35,12 @@ def main() -> None:
     eval_parser.add_argument("--limit", type=int)
     eval_parser.add_argument("--failures", type=int, default=20)
 
+    embed_parser = subparsers.add_parser("embed")
+    embed_subparsers = embed_parser.add_subparsers(dest="embed_command", required=True)
+    embed_objects_parser = embed_subparsers.add_parser("objects")
+    embed_objects_parser.add_argument("--limit", type=int)
+    embed_objects_parser.add_argument("--dimensions", type=int, default=16)
+
     args = parser.parse_args()
     store = SQLiteObjectStore(db_path=args.db, source_path=args.source)
     store.initialize(force_import=getattr(args, "force", False))
@@ -47,6 +59,26 @@ def main() -> None:
         elif args.command == "eval":
             summary = evaluate_routes(store, limit=args.limit, max_failures=args.failures)
             print(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2))
+        elif args.command == "embed":
+            if args.embed_command == "objects":
+                provider = FakeEmbeddingProvider(dimensions=args.dimensions)
+                embedding_store = SQLiteEmbeddingStore(store.conn)
+                objects = list(store.list_objects())
+                if args.limit is not None:
+                    objects = objects[: args.limit]
+                for obj in objects:
+                    embedding_store.ensure_embedding(build_object_embedding_text(obj), provider)
+                print(
+                    json.dumps(
+                        {
+                            "embedded": len(objects),
+                            "model": provider.model,
+                            "dimensions": provider.dimensions,
+                            "active": embedding_store.count_by_status(EMBEDDING_STATUS_ACTIVE),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
     finally:
         store.close()
 

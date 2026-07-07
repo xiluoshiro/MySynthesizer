@@ -5,6 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from mysynth.embeddings import (
+    EMBEDDING_STATUS_ACTIVE,
+    EMBEDDING_STATUS_STALE,
+    FakeEmbeddingProvider,
+    SQLiteEmbeddingStore,
+    build_object_embedding_text,
+)
 from mysynth.engine import RuleSynthesizerEngine
 from mysynth.evaluation import evaluate_routes
 from mysynth.models import CraftOptions, CraftRequest
@@ -166,6 +173,34 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertLess(summary.exact_id_match, 1)
         self.assertEqual(len(summary.failures), 1)
         self.assertEqual(summary.failures[0].expected_name, "水")
+
+    # 测试点：同一对象文本和模型重复生成 embedding 时会复用已有 active 记录。
+    def test_embedding_store_deduplicates_same_text(self) -> None:
+        water = self.store.get_object(1)
+        self.assertIsNotNone(water)
+        provider = FakeEmbeddingProvider(dimensions=8)
+        embedding_store = SQLiteEmbeddingStore(self.store.conn)
+        text = build_object_embedding_text(water)
+
+        first = embedding_store.ensure_embedding(text, provider)
+        second = embedding_store.ensure_embedding(text, provider)
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(embedding_store.count_by_status(EMBEDDING_STATUS_ACTIVE), 1)
+
+    # 测试点：对象 embedding 文本变化后旧 active 记录会标记为 stale。
+    def test_embedding_store_marks_changed_text_stale(self) -> None:
+        water = self.store.get_object(1)
+        self.assertIsNotNone(water)
+        provider = FakeEmbeddingProvider(dimensions=8)
+        embedding_store = SQLiteEmbeddingStore(self.store.conn)
+
+        embedding_store.ensure_embedding(build_object_embedding_text(water), provider)
+        changed = water.model_copy(update={"description": "新的水描述"})
+        embedding_store.ensure_embedding(build_object_embedding_text(changed), provider)
+
+        self.assertEqual(embedding_store.count_by_status(EMBEDDING_STATUS_ACTIVE), 1)
+        self.assertEqual(embedding_store.count_by_status(EMBEDDING_STATUS_STALE), 1)
 
 
 if __name__ == "__main__":

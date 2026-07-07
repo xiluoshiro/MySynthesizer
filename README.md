@@ -4,6 +4,25 @@
 
 当前已开始实现一个本地 Python 合成器引擎原型：读取已有图谱，导入 SQLite，执行 `craft()` 合成流程，并提供 CLI 做单次合成和 route 回放评估。
 
+## 当前进展
+
+已完成：
+
+- Python 包结构和核心数据模型。
+- SQLite 本地存储，覆盖对象、原始 payload、路线边、recipe cache、合成事件、失败记录。
+- 第一版规则合成 pipeline：校验、缓存、特征抽取、意图判断、候选生成、召回、评分、决策、持久化。
+- CLI：`init`、`craft`、`eval`、`embed objects`。
+- 评估与测试看护：根目录 `scripts/run_tests.py` 可一键运行语法检查和单元测试。
+- 向量化基础层：embedding 文本构造、fake provider、SQLite sidecar 表、去重和 stale 标记。
+
+进行中：
+
+- 质量治理和状态过滤尚未落地，当前本地新对象仍偏原型行为。
+- 真实向量模型、向量库和 LLM 候选生成尚未接入。
+- 邻接路线证据仍需进一步收窄，避免作为宽泛候选扩散来源。
+
+建议下一步优先实现质量治理最小闭环：对象状态、duplicate/canonical 检查、pending/rejected/merged 隔离，以及 active-only 召回。
+
 ## 当前入口
 
 - `docs/design/mysynthesizer-synthesizer-design.md`：合成器机制、正向模型、AI 操作规则的统一设计文档。
@@ -36,6 +55,7 @@ mysynth/
   features.py     规则特征抽取
   intent.py       合成意图判断
   normalize.py    名称、文本、recipe key 标准化
+  embeddings.py   embedding 文本、provider 接口、SQLite sidecar 写入
   evaluation.py   route_edges 回放评估
   cli.py          命令行入口
 ```
@@ -74,6 +94,14 @@ python -B -m mysynth eval --limit 20 --failures 10
 
 评估输出包含总体命中率、按 `operation/type` 分桶的指标，以及未精确命中的失败样本。
 
+生成本地 fake embedding：
+
+```bash
+python -B -m mysynth embed objects --limit 100
+```
+
+当前 embedding 命令使用确定性的 `fake-hash-v1` provider，只用于验证 embedding schema、去重和 stale 逻辑；真实向量模型和向量库后续接入。
+
 运行全部测试：
 
 ```bash
@@ -85,6 +113,7 @@ python -B scripts/run_tests.py
 - 当前 CLI 默认读取 `outputs/data/current/mysynthesizer_mine_full_routes_latest.json`。
 - 当前主存储是 SQLite，不需要外部数据库服务。
 - `--no-persist` 用于只看结果、不写入本地 craft 记录。
+- `embed objects` 会写入 SQLite 的 embedding sidecar 表，不调用外部模型。
 - `scripts/run_tests.py` 是统一测试入口，当前包含语法检查和 `unittest` 发现，后续测试套件继续挂到这里。
 - 在当前 Windows 环境里建议使用 `python -B`，避免写 `__pycache__` 时触发权限问题。
 

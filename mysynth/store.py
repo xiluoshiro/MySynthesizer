@@ -74,6 +74,7 @@ class SQLiteObjectStore:
         self.conn.close()
 
     def _create_schema(self) -> None:
+        # SQLite 统一承载元数据、路线、事件和 embedding sidecar。
         self.conn.executescript(
             """
             PRAGMA journal_mode=WAL;
@@ -130,10 +131,35 @@ class SQLiteObjectStore:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_type TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                model TEXT NOT NULL,
+                dimensions INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                vector_backend_id TEXT,
+                vector_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS embedding_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_type TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_objects_normalized_name ON objects(normalized_name);
             CREATE INDEX IF NOT EXISTS idx_objects_type ON objects(type);
             CREATE INDEX IF NOT EXISTS idx_route_edges_inputs ON route_edges(a_id, b_id, operation);
             CREATE INDEX IF NOT EXISTS idx_route_edges_result ON route_edges(result_id);
+            CREATE INDEX IF NOT EXISTS idx_embeddings_owner ON embeddings(owner_type, owner_id, model, status);
+            CREATE INDEX IF NOT EXISTS idx_embeddings_hash ON embeddings(text_hash, model, status);
             """
         )
         self.conn.commit()
@@ -147,6 +173,7 @@ class SQLiteObjectStore:
         objects = graph.get("objects", [])
         edges = graph.get("route_edges", [])
         with self.conn:
+            # 导入用事务保证对象、边和 recipe cache 一致。
             if clear:
                 self.conn.execute("DELETE FROM failures")
                 self.conn.execute("DELETE FROM craft_events")
@@ -164,6 +191,7 @@ class SQLiteObjectStore:
                 self._insert_route_edge(edge, source="import")
 
     def rebuild_indexes(self) -> None:
+        # 从 SQLite 重建在线索引，后续 status 过滤也应放在这里。
         self.objects_by_id.clear()
         self.name_index.clear()
         self.token_index.clear()
@@ -194,6 +222,7 @@ class SQLiteObjectStore:
 
         edge_rows = self.conn.execute("SELECT a_id, b_id, result_id FROM route_edges").fetchall()
         for row in edge_rows:
+            # 邻接只用于诊断和受限路线证据，不做宽泛候选扩散。
             a_id = int(row["a_id"])
             b_id = int(row["b_id"])
             result_id = int(row["result_id"])
@@ -218,6 +247,7 @@ class SQLiteObjectStore:
         return [self.objects_by_id[item] for item in neighbor_ids if item in self.objects_by_id]
 
     def find_edges_by_inputs(self, a_id: ObjectId, b_id: ObjectId, operation: Operation) -> list[RouteEdge]:
+        # add 查询按交换律处理，subtract 保留 A/B 方向。
         pairs = [(a_id, b_id)]
         if operation == "add" and a_id != b_id:
             pairs.append((b_id, a_id))
@@ -241,6 +271,7 @@ class SQLiteObjectStore:
         seen: set[ObjectId] = set()
         allowed = self.type_index.get(synth_type, set())
         normalized_tokens: list[str] = []
+        # 同时支持已分词 token 和候选里的短语。
         for token in tokens:
             normalized_tokens.extend(item.casefold() for item in tokenize(token))
         for token in normalized_tokens:
@@ -268,6 +299,7 @@ class SQLiteObjectStore:
                     seen.add(value)
                     ids.append(value)
 
+        # 先召回精确/文本匹配，再用同 type 对象低置信兜底。
         add_many(self.name_index.get(normalize_name(candidate.name), set()))
         for token in tokenize(" ".join([candidate.name, candidate.description, *candidate.core_tags, *candidate.anchors])):
             add_many(self.token_index.get(token.casefold(), set()))
@@ -283,6 +315,7 @@ class SQLiteObjectStore:
         score_json = result.score_breakdown.model_dump_json() if result.score_breakdown else None
 
         with self.conn:
+            # 失败也作为调试证据持久化，避免静默丢失。
             if not result.success:
                 self.conn.execute(
                     """
@@ -307,6 +340,7 @@ class SQLiteObjectStore:
             a_id = request.ingredient_a.id
             b_id = request.ingredient_b.id
             if a_id is not None and b_id is not None and saved_result.id is not None:
+                # 成功合成同时写入图证据和精确 recipe cache。
                 self._insert_route_edge(
                     RouteEdge(
                         result_id=saved_result.id,

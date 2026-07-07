@@ -16,6 +16,7 @@ class RuleSynthesizerEngine:
         self.store = store
 
     def craft(self, request: CraftRequest) -> CraftResult:
+        # 先处理失败和缓存路径，避免无谓生成候选。
         failure = self._validate(request)
         if failure is not None:
             result = CraftResult(success=False, failure_reason=failure, decision="failed", explanation=failure)
@@ -41,6 +42,7 @@ class RuleSynthesizerEngine:
         a_features = extract_features(request.ingredient_a)
         b_features = extract_features(request.ingredient_b)
         intent = plan_intent(request.ingredient_a, request.ingredient_b, a_features, b_features, request.operation)
+        # 候选生成和匹配分离，后续可直接接入 LLM 候选。
         candidates = generate_candidates(
             request.ingredient_a,
             request.ingredient_b,
@@ -58,6 +60,7 @@ class RuleSynthesizerEngine:
         best_candidate, top_matches = self._rank_candidates(candidates, request)
         best_match = top_matches[0] if top_matches else None
 
+        # 只有强匹配才复用已有对象，弱匹配走本地新候选。
         if best_match and best_match.score.total >= request.options.match_threshold:
             matched = self.store.get_object(best_match.object_id)
             if matched is not None:
@@ -111,6 +114,7 @@ class RuleSynthesizerEngine:
                 route_prior = self._route_prior(request, obj.id)
                 match = score_match(candidate, obj, route_prior=route_prior)
                 current = best_by_object.get(match.object_id)
+                # 同一已有对象只保留最高分候选解释。
                 if current is None or match.score.total > current[1].score.total:
                     best_by_object[match.object_id] = (candidate, match)
         scored = list(best_by_object.values())
@@ -129,6 +133,7 @@ class RuleSynthesizerEngine:
                     seen.add(value.id)
                     objects.append(value)
 
+        # 混合召回：候选文本、受限图证据、type/token 兜底。
         add_many(self.store.search_candidates(candidate, request.options.max_retrieved))
         if request.ingredient_a.id is not None:
             add_many(self.store.get_neighbors(request.ingredient_a.id, limit=20))
@@ -147,6 +152,7 @@ class RuleSynthesizerEngine:
     def _route_prior(self, request: CraftRequest, object_id: int | None) -> float:
         if object_id is None:
             return 0.0
+        # route 加分保持较弱，避免图邻近压过语义冲突。
         a_neighbors = getattr(self.store, "neighbors_by_object", {}).get(request.ingredient_a.id, set())
         b_neighbors = getattr(self.store, "neighbors_by_object", {}).get(request.ingredient_b.id, set())
         if object_id in a_neighbors and object_id in b_neighbors:
@@ -173,6 +179,7 @@ class RuleSynthesizerEngine:
         )
 
     def _result_object(self, obj: SynthObject) -> SynthObject:
+        # 完整对象可能带大量 craft_sources，响应只保留稳定字段。
         payload = obj.model_dump(mode="json", exclude={"craft_sources"})
         return SynthObject.model_validate(payload)
 
