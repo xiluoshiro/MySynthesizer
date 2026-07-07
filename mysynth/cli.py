@@ -27,6 +27,10 @@ def main() -> None:
 
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--force", action="store_true")
+    init_parser.add_argument("--full", action="store_true")
+
+    reset_parser = subparsers.add_parser("reset")
+    reset_parser.add_argument("--yes", action="store_true")
 
     craft_parser = subparsers.add_parser("craft")
     craft_parser.add_argument("--a", type=int, required=True)
@@ -67,6 +71,8 @@ def main() -> None:
     embed_recipes_parser.add_argument("--dimensions", type=int, default=16)
 
     args = parser.parse_args()
+    if args.command == "reset" and not args.yes:
+        raise SystemExit("reset is destructive; rerun with --yes")
     if args.command == "workbench":
         run_workbench(
             db_path=args.db,
@@ -79,10 +85,12 @@ def main() -> None:
         return
 
     store = SQLiteObjectStore(db_path=args.db, source_path=args.source)
-    store.initialize(force_import=getattr(args, "force", False))
+    store.initialize(force_import=getattr(args, "force", False), full_import=getattr(args, "full", False))
     try:
         if args.command == "init":
-            print(json.dumps({"ok": True, "db": str(Path(args.db))}, ensure_ascii=False))
+            print(json.dumps({"ok": True, "db": str(Path(args.db)), "full": args.full}, ensure_ascii=False))
+        elif args.command == "reset":
+            print(json.dumps(store.reset_to_initial_state(), ensure_ascii=False, indent=2))
         elif args.command == "craft":
             a = store.get_object(args.a)
             b = store.get_object(args.b)

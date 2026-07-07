@@ -11,11 +11,11 @@
 - Python 包结构和核心数据模型。
 - SQLite 本地存储，覆盖对象、原始 payload、路线边、recipe cache、合成事件、失败记录。
 - 第一版规则合成 pipeline：校验、缓存、特征抽取、意图判断、候选生成、召回、评分、决策、持久化。
-- CLI：`init`、`craft`、`eval`、`workbench`、`embed objects/recipes`、`review promote/reject/merge`。
+- CLI：`init`、`reset`、`craft`、`eval`、`workbench`、`embed objects/recipes`、`review promote/reject/merge`。
 - 评估与测试看护：根目录 `scripts/run_tests.py` 可一键运行语法检查和单元测试。
 - 向量化实验层：embedding 文本构造、fake provider、SQLite sidecar 表、去重、stale 标记、本地 vector top-k 召回；默认不参与 craft。
 - 质量治理基础闭环：active-only 在线召回、`created_pending`、`merged_existing`、`object_aliases`、disabled route、pending 的 promote/reject/merge 审核命令。
-- 本地 workbench：标准库 loopback HTTP + `ui/` 静态页面，可搜索对象、查看对象详情、执行合成、结构化展示结果和审核 pending。
+- 本地 workbench：标准库 loopback HTTP + `ui/` 静态页面，可搜索对象、查看对象详情、执行合成、结构化展示结果、审核 pending 和一键还原。
 - PyInstaller 打包脚本：`scripts/build_desktop.py`，已验证真实构建输出 `dist/MySynthesizer/`。
 
 进行中：
@@ -76,10 +76,16 @@ mysynth/
 - Python `>= 3.12`
 - Pydantic `>= 2.0`
 
-初始化本地 SQLite：
+初始化本地 SQLite。默认只保留初始四元素 `1=水 / 2=火 / 3=土 / 4=风`：
 
 ```bash
 python -B -m mysynth init --force
+```
+
+导入完整图谱用于开发和回放评估：
+
+```bash
+python -B -m mysynth init --force --full
 ```
 
 单次合成：
@@ -97,6 +103,14 @@ python -B -m mysynth workbench --port 8765
 ```
 
 打开 `http://127.0.0.1:8765/` 后可搜索对象、查看对象详情、选择 A/B、执行合成、查看结构化结果和 top matches，并审核 pending 对象。
+
+还原到初始四元素：
+
+```bash
+python -B -m mysynth reset --yes
+```
+
+还原会删除除 `1/2/3/4` 外的所有对象和全部路线、recipe cache、事件、失败记录、alias、embedding 派生数据。UI 右侧维护区也提供同样的“还原到初始四元素”按钮。
 
 回放评估：
 
@@ -163,6 +177,7 @@ dist/MySynthesizer/
 
 - 当前 CLI 默认读取 `outputs/data/current/mysynthesizer_mine_full_routes_latest.json`。
 - 当前主存储是 SQLite，不需要外部数据库服务。
+- `init` 默认生成四元素初始库；`init --full` 才导入完整图谱。
 - `--no-persist` 用于只看结果、不写入本地 craft 记录。
 - craft 默认不启用 vector 召回；`--use-vectors` 只用于实验。
 - `embed objects/recipes` 会写入 SQLite 的 embedding sidecar 表，不调用外部模型。

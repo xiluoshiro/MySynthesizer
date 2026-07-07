@@ -13,6 +13,7 @@ from .normalize import normalize_name, normalize_text, object_search_text, recip
 
 
 RecipeKey = str
+INITIAL_OBJECT_IDS: tuple[ObjectId, ...] = (1, 2, 3, 4)
 
 
 class ObjectStore(Protocol):
@@ -67,12 +68,14 @@ class SQLiteObjectStore:
         self.neighbors_by_object: dict[ObjectId, set[ObjectId]] = defaultdict(set)
         self.fts_enabled = False
 
-    def initialize(self, force_import: bool = False) -> None:
+    def initialize(self, force_import: bool = False, full_import: bool = False) -> None:
         self._create_schema()
         if force_import or self._object_count() == 0:
             if not self.source_path.exists():
                 raise FileNotFoundError(f"Source graph not found: {self.source_path}")
             self.import_graph(self.source_path, clear=force_import)
+            if not full_import:
+                self.reset_to_initial_state()
         self.rebuild_indexes()
 
     def close(self) -> None:
@@ -565,6 +568,66 @@ class SQLiteObjectStore:
                 )
         self.rebuild_indexes()
         return self.all_objects_by_id[object_id]
+
+    def reset_to_initial_state(self) -> dict[str, object]:
+        existing = {
+            int(row["id"])
+            for row in self.conn.execute(
+                f"SELECT id FROM objects WHERE id IN ({','.join('?' for _ in INITIAL_OBJECT_IDS)})",
+                INITIAL_OBJECT_IDS,
+            ).fetchall()
+        }
+        missing = [object_id for object_id in INITIAL_OBJECT_IDS if object_id not in existing]
+        if missing:
+            raise ValueError(f"initial objects missing: {missing}")
+        before_objects = self.conn.execute("SELECT COUNT(*) AS count FROM objects").fetchone()["count"]
+        before_edges = self.conn.execute("SELECT COUNT(*) AS count FROM route_edges").fetchone()["count"]
+        before_recipes = self.conn.execute("SELECT COUNT(*) AS count FROM recipe_cache").fetchone()["count"]
+        placeholders = ",".join("?" for _ in INITIAL_OBJECT_IDS)
+        with self.conn:
+            # 还原会清空除初始元素外的事实和派生索引。
+            self.conn.execute("DELETE FROM failures")
+            self.conn.execute("DELETE FROM craft_events")
+            self.conn.execute("DELETE FROM recipe_cache")
+            self.conn.execute("DELETE FROM route_edges")
+            self.conn.execute("DELETE FROM object_aliases")
+            self.conn.execute("DELETE FROM embeddings")
+            self.conn.execute("DELETE FROM embedding_jobs")
+            self.conn.execute(f"DELETE FROM object_payloads WHERE object_id NOT IN ({placeholders})", INITIAL_OBJECT_IDS)
+            self.conn.execute(f"DELETE FROM objects WHERE id NOT IN ({placeholders})", INITIAL_OBJECT_IDS)
+            self.conn.execute(
+                f"""
+                UPDATE objects
+                SET status = 'active', canonical_id = NULL, quality_flags = '[]'
+                WHERE id IN ({placeholders})
+                """,
+                INITIAL_OBJECT_IDS,
+            )
+            if self.fts_enabled:
+                self.conn.execute("DELETE FROM object_fts")
+                rows = self.conn.execute(
+                    f"""
+                    SELECT object_payloads.payload_json, objects.status, objects.canonical_id, objects.quality_flags
+                    FROM objects
+                    JOIN object_payloads ON object_payloads.object_id = objects.id
+                    WHERE objects.id IN ({placeholders})
+                    """,
+                    INITIAL_OBJECT_IDS,
+                ).fetchall()
+                for row in rows:
+                    self._upsert_object_fts(self._object_from_row(row))
+        self.rebuild_indexes()
+        kept_objects = [
+            {"id": obj.id, "name": obj.name, "emoji": obj.emoji, "type": obj.type}
+            for obj in sorted(self.objects_by_id.values(), key=lambda item: item.id or 0)
+        ]
+        return {
+            "ok": True,
+            "kept_objects": kept_objects,
+            "deleted_objects": max(0, int(before_objects) - len(INITIAL_OBJECT_IDS)),
+            "deleted_edges": int(before_edges),
+            "deleted_recipes": int(before_recipes),
+        }
 
     def next_local_id(self) -> int:
         row = self.conn.execute("SELECT MIN(id) AS min_id FROM objects").fetchone()

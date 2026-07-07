@@ -28,6 +28,7 @@
 - [x] 本地文本召回：SQLite FTS5 可用时优先使用，失败时回退到内存 token 索引。
 - [x] 向量化实验层已实现到 SQLite sidecar、fake provider 和本地 vector top-k 召回，默认不进入 craft 主链路。
 - [x] 质量治理基础闭环：active-only 查询、pending/rejected/merged 隔离、promote/reject/merge 审核命令。
+- [x] 初始四元素产品状态：默认库和一键还原只保留 `1=水 / 2=火 / 3=土 / 4=风`。
 - [x] 本地 workbench：exe 内可托管的 loopback 小服务 + `ui/` 静态页面。
 - [x] PyInstaller 打包入口和真实构建验收。
 - [ ] workbench 批量操作、筛选排序、审核记录和桌面窗口壳。
@@ -180,12 +181,14 @@ SQLite 表职责：
 
 写入策略：
 
-1. 首次启动时从 `outputs/data/current/mysynthesizer_mine_full_routes_latest.json` 初始化 SQLite。
-2. 后续启动优先读取 `data/engine/mysynth.db`，除非显式执行重新导入。
-3. 新建对象时分配本地负 id，避免和线上正整数 id 冲突。
-4. 每次本地 craft 成功后，在一个事务内写入 `objects`、`route_edges`、`recipe_cache` 和 `craft_events`。
-5. craft 失败时写入 `failures`，并保留足够上下文用于复现。
-6. 导出 JSON/JSONL 时使用快照，不作为主写入路径。
+1. 首次启动时从 `outputs/data/current/mysynthesizer_mine_full_routes_latest.json` 初始化 SQLite，然后默认还原到初始四元素。
+2. `init --full` 可导入完整图谱，用于开发、回放评估和路线分析。
+3. 后续启动优先读取 `data/engine/mysynth.db`，除非显式执行重新导入或 reset。
+4. 新建对象时分配本地负 id，避免和线上正整数 id 冲突。
+5. 每次本地 craft 成功后，在一个事务内写入 `objects`、`route_edges`、`recipe_cache` 和 `craft_events`。
+6. craft 失败时写入 `failures`，并保留足够上下文用于复现。
+7. `reset` 会删除除 `1/2/3/4` 外的对象、全部路线、recipe cache、alias、事件、失败记录和 embedding 派生数据。
+8. 导出 JSON/JSONL 时使用快照，不作为主写入路径。
 
 内存索引：
 
@@ -917,7 +920,7 @@ flowchart TD
 - 提供 `python -B -m mysynth workbench` 本地入口。
 - exe 进程内启动 loopback 小服务，托管 `ui/` 静态 HTML/JS/CSS。
 - UI 第一版支持搜索对象、查看对象详情、选择 A/B、选择 add/subtract、执行 craft、展示 result/decision/explanation/top_matches。
-- UI 第一版支持 pending 的 promote/reject/merge。
+- UI 第一版支持 pending 的 promote/reject/merge 和一键还原到初始四元素。
 - 提供 `scripts/build_desktop.py --dry-run` 输出打包计划。
 - 提供 `scripts/build_desktop.py` 用 PyInstaller 输出 `dist/MySynthesizer/MySynthesizer.exe`，并带上 exe 同级 `data/` 和 `ui/`。
 
@@ -926,6 +929,8 @@ flowchart TD
 - 已新增 `/api/objects/{id}` 本地详情接口，供 UI 展示对象稳定字段。
 - craft 结果已从纯 JSON 输出改为结构化摘要、解释、top matches 和可展开原始结果。
 - `workbench` 使用单线程 `HTTPServer`，避免 SQLite 连接跨线程导致请求断开。
+- 已新增 `/api/reset` 本地还原接口；CLI 新增 `reset --yes`，`init --full` 保留完整图谱入口。
+- 打包脚本复制 runtime DB 后会执行还原，确保 `dist/MySynthesizer` 首次打开只有初始四元素。
 - 已完成真实 PyInstaller 构建验收：`dist/MySynthesizer/MySynthesizer.exe` 可启动，页面、对象详情和 craft 接口均返回 200。
 - 打包脚本会在 PyInstaller onedir 输出后复制 `ui/` 和 `data/engine` 到 exe 同级，避免运行时依赖开发目录。
 
@@ -933,6 +938,7 @@ flowchart TD
 
 - 本地 workbench 入口能完成一次 craft。
 - 本地 workbench HTTP 搜索和对象详情接口可访问。
+- 本地 workbench reset 后只保留初始四元素。
 - UI 调用的本地接口不绕过 engine 和 store。
 - dry-run 能检查打包入口、UI 目录和数据目录。
 - 实际 PyInstaller 构建后能用 exe 同级 SQLite 数据启动。

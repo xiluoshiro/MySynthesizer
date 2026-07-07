@@ -62,6 +62,13 @@ button.active,
   color: #fff;
 }
 
+.danger {
+  width: 100%;
+  border-color: #dc2626;
+  background: #dc2626;
+  color: #fff;
+}
+
 input {
   width: 100%;
   padding: 0 10px;
@@ -198,6 +205,14 @@ label {
 .output.small {
   min-height: 160px;
   margin-top: 10px;
+}
+
+.maintenance {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #e2e8f0;
 }
 
 .detail,

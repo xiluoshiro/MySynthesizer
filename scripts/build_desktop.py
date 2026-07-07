@@ -11,6 +11,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from mysynth.store import SQLiteObjectStore
+
 DIST_DIR = ROOT / "dist" / "MySynthesizer"
 ENTRY_SCRIPT = ROOT / "scripts" / "workbench_entry.py"
 
@@ -76,6 +81,15 @@ def _pyinstaller_command() -> list[str] | None:
 def _copy_runtime_assets() -> None:
     shutil.copytree(ROOT / "ui", DIST_DIR / "ui", dirs_exist_ok=True)
     shutil.copytree(ROOT / "data" / "engine", DIST_DIR / "data" / "engine", dirs_exist_ok=True)
+    store = SQLiteObjectStore(
+        db_path=DIST_DIR / "data" / "engine" / "mysynth.db",
+        source_path=ROOT / "outputs" / "data" / "current" / "mysynthesizer_mine_full_routes_latest.json",
+    )
+    try:
+        store.initialize(full_import=True)
+        store.reset_to_initial_state()
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

@@ -68,6 +68,9 @@ class WorkbenchService:
             raise ValueError(f"unknown review action: {action}")
         return {"ok": True, "object": obj.model_dump(mode="json")}
 
+    def reset(self) -> dict[str, object]:
+        return self.store.reset_to_initial_state()
+
 
 def run_workbench(
     *,
@@ -137,6 +140,9 @@ def _handler(service: WorkbenchService, ui_dir: Path) -> type[BaseHTTPRequestHan
                 payload = self._read_json()
                 if parsed.path == "/api/craft":
                     self._json(service.craft(payload))
+                    return
+                if parsed.path == "/api/reset":
+                    self._json(service.reset())
                     return
                 if parsed.path.startswith("/api/review/"):
                     action = parsed.path.rsplit("/", 1)[-1]

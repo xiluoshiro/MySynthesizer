@@ -149,7 +149,7 @@ class EngineScenarioTests(unittest.TestCase):
         self.db_path = root / "mysynth.db"
         _write_graph(self.graph_path)
         self.store = SQLiteObjectStore(db_path=self.db_path, source_path=self.graph_path)
-        self.store.initialize(force_import=True)
+        self.store.initialize(force_import=True, full_import=True)
 
     def tearDown(self) -> None:
         self.store.close()
@@ -189,6 +189,30 @@ class EngineScenarioTests(unittest.TestCase):
 
         self.assertIn("氢气", names)
         self.assertNotIn("待定水", names)
+
+    # 测试点：还原会只保留初始 ID 并清空路线、缓存和派生数据。
+    def test_reset_to_initial_state_clears_graph_and_side_data(self) -> None:
+        SQLiteEmbeddingStore(self.store.conn).ensure_embedding(build_object_embedding_text(self.store.get_object(1)), FakeEmbeddingProvider())
+        self.store.conn.execute(
+            "INSERT OR REPLACE INTO object_aliases(alias, normalized_alias, object_id, source, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("别名水", "别名水", 1, "test", "now"),
+        )
+        self.store.conn.execute(
+            "INSERT INTO failures(request_json, reason, context_json, created_at) VALUES (?, ?, ?, ?)",
+            ("{}", "test", "{}", "now"),
+        )
+        self.store.conn.commit()
+
+        summary = self.store.reset_to_initial_state()
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual({obj.id for obj in self.store.list_objects()}, {1, 2, 3, 4})
+        self.assertEqual(self.store.list_route_edges(), [])
+        for table in ["recipe_cache", "object_aliases", "craft_events", "failures", "embeddings", "embedding_jobs"]:
+            count = self.store.conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]
+            self.assertEqual(count, 0, table)
+        self.assertTrue({obj.id for obj in self.store.search_text("火蜥蜴 特殊待定", limit=10)} <= {1, 2, 3, 4})
+        self.assertIn(2, {obj.id for obj in self.store.search_text("燃烧", limit=10)})
 
     # 测试点：默认在线视图会隔离 pending 对象，避免进入查询和召回。
     def test_store_filters_inactive_objects_from_online_view(self) -> None:
@@ -522,6 +546,23 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertEqual(result.result.status, "pending")
         self.assertIsNone(self.store.find_recipe("subtract:1:3"))
 
+    # 测试点：还原后初始元素合成不命中旧路线，会生成隔离的 pending 对象。
+    def test_craft_after_reset_creates_pending_without_active_recall(self) -> None:
+        self.store.reset_to_initial_state()
+        fire = self.store.get_object(2)
+        initial = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(initial)
+
+        result = RuleSynthesizerEngine(self.store).craft(
+            CraftRequest(operation="add", ingredient_a=fire, ingredient_b=initial)
+        )
+
+        self.assertEqual(result.decision, "created_pending")
+        self.assertIsNotNone(result.result.id)
+        self.assertIsNone(self.store.get_object(result.result.id))
+        self.assertEqual(self.store.find_edges_by_inputs(2, 3, "add"), [])
+
     # 测试点：pending 新对象持久化后不会进入默认在线对象、active route 或 recipe cache。
     def test_created_pending_persists_without_active_recall_or_cache(self) -> None:
         fire = self.store.get_object(2)
@@ -733,7 +774,14 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertEqual(result["object"]["name"], "水")
         self.assertEqual(result["object"]["status"], "active")
 
-    # 测试点：workbench HTTP 入口启动后能访问搜索接口，避免 SQLite 跨线程访问。
+    # 测试点：WorkbenchService reset 会调用同一套还原逻辑并返回摘要。
+    def test_workbench_service_resets_to_initial_state(self) -> None:
+        result = WorkbenchService(self.store).reset()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual({obj.id for obj in self.store.list_objects()}, {1, 2, 3, 4})
+
+    # 测试点：workbench HTTP 入口能访问搜索、详情和还原接口。
     def test_workbench_http_endpoints_respond(self) -> None:
         process = subprocess.Popen(
             [
@@ -763,9 +811,18 @@ class EngineScenarioTests(unittest.TestCase):
                 search_data = json.loads(response.read().decode("utf-8"))
             with urllib.request.urlopen(f"{payload['url']}api/objects/1", timeout=5) as response:
                 detail_data = json.loads(response.read().decode("utf-8"))
+            reset_request = urllib.request.Request(
+                f"{payload['url']}api/reset",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(reset_request, timeout=5) as response:
+                reset_data = json.loads(response.read().decode("utf-8"))
 
             self.assertIn("objects", search_data)
             self.assertEqual(detail_data["object"]["name"], "水")
+            self.assertEqual({obj["id"] for obj in reset_data["kept_objects"]}, {1, 2, 3, 4})
         finally:
             process.terminate()
             try:
@@ -792,6 +849,118 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertTrue(payload["ok"])
         self.assertIn("ui", payload["plan"])
+
+    # 测试点：CLI init 默认只保留初始元素，--full 保留完整导入。
+    def test_cli_init_default_and_full_modes(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        default_db = Path(self.temp_dir.name) / "cli_default.db"
+        full_db = Path(self.temp_dir.name) / "cli_full.db"
+
+        default_result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "mysynth",
+                "--db",
+                str(default_db),
+                "--source",
+                str(self.graph_path),
+                "init",
+                "--force",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        full_result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "mysynth",
+                "--db",
+                str(full_db),
+                "--source",
+                str(self.graph_path),
+                "init",
+                "--force",
+                "--full",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(default_result.returncode, 0)
+        self.assertEqual(full_result.returncode, 0)
+        default_store = SQLiteObjectStore(db_path=default_db, source_path=self.graph_path)
+        full_store = SQLiteObjectStore(db_path=full_db, source_path=self.graph_path)
+        try:
+            default_store.initialize(full_import=True)
+            full_store.initialize(full_import=True)
+            self.assertEqual({obj.id for obj in default_store.list_objects()}, {1, 2, 3, 4})
+            self.assertGreater(len(list(full_store.list_objects())), 4)
+        finally:
+            default_store.close()
+            full_store.close()
+
+    # 测试点：CLI reset 必须显式确认，确认后只保留初始元素。
+    def test_cli_reset_requires_yes_and_resets(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        db_path = Path(self.temp_dir.name) / "cli_reset.db"
+        subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "mysynth",
+                "--db",
+                str(db_path),
+                "--source",
+                str(self.graph_path),
+                "init",
+                "--force",
+                "--full",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        rejected = subprocess.run(
+            [sys.executable, "-B", "-m", "mysynth", "--db", str(db_path), "--source", str(self.graph_path), "reset"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        accepted = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "mysynth",
+                "--db",
+                str(db_path),
+                "--source",
+                str(self.graph_path),
+                "reset",
+                "--yes",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        payload = json.loads(accepted.stdout)
+
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(accepted.returncode, 0)
+        self.assertEqual({obj["id"] for obj in payload["kept_objects"]}, {1, 2, 3, 4})
 
 
 if __name__ == "__main__":

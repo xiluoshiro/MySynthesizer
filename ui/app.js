@@ -7,6 +7,7 @@ const state = {
 const results = document.querySelector("#results");
 const output = document.querySelector("#output");
 const reviewOutput = document.querySelector("#reviewOutput");
+const resetOutput = document.querySelector("#resetOutput");
 const objectDetail = document.querySelector("#objectDetail");
 const craftSummary = document.querySelector("#craftSummary");
 const topMatches = document.querySelector("#topMatches");
@@ -21,6 +22,7 @@ document.querySelector("#craftButton").addEventListener("click", craft);
 document.querySelector("#promoteButton").addEventListener("click", () => review("promote"));
 document.querySelector("#rejectButton").addEventListener("click", () => review("reject"));
 document.querySelector("#mergeButton").addEventListener("click", () => review("merge"));
+document.querySelector("#resetButton").addEventListener("click", resetToInitial);
 
 search();
 
@@ -187,6 +189,26 @@ async function review(action) {
   if (action === "merge") payload.canonical_id = Number(document.querySelector("#canonicalId").value);
   const data = await postJson(`/api/review/${action}`, payload);
   reviewOutput.textContent = JSON.stringify(data, null, 2);
+}
+
+async function resetToInitial() {
+  if (!window.confirm("还原会删除除水、火、土、风以外的所有对象和路线，确定继续？")) {
+    return;
+  }
+  const data = await postJson("/api/reset", {});
+  if (!data.error && data.ok) {
+    state.a = null;
+    state.b = null;
+    renderSlots();
+    objectDetail.className = "detail empty";
+    objectDetail.textContent = "";
+    craftSummary.className = "summary empty";
+    craftSummary.textContent = "";
+    topMatches.innerHTML = "";
+    output.textContent = "";
+    await search();
+  }
+  resetOutput.textContent = JSON.stringify(data, null, 2);
 }
 
 async function getJson(url) {
