@@ -35,6 +35,11 @@ def main() -> None:
     eval_parser.add_argument("--limit", type=int)
     eval_parser.add_argument("--failures", type=int, default=20)
 
+    review_parser = subparsers.add_parser("review")
+    review_subparsers = review_parser.add_subparsers(dest="review_command", required=True)
+    promote_parser = review_subparsers.add_parser("promote")
+    promote_parser.add_argument("--id", type=int, required=True)
+
     embed_parser = subparsers.add_parser("embed")
     embed_subparsers = embed_parser.add_subparsers(dest="embed_command", required=True)
     embed_objects_parser = embed_subparsers.add_parser("objects")
@@ -59,6 +64,19 @@ def main() -> None:
         elif args.command == "eval":
             summary = evaluate_routes(store, limit=args.limit, max_failures=args.failures)
             print(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2))
+        elif args.command == "review":
+            if args.review_command == "promote":
+                promoted = store.promote_pending_object(args.id)
+                print(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "object": promoted.model_dump(mode="json"),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
         elif args.command == "embed":
             if args.embed_command == "objects":
                 provider = FakeEmbeddingProvider(dimensions=args.dimensions)

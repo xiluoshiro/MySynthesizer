@@ -95,11 +95,28 @@ class RuleSynthesizerEngine:
                     self.store.save_craft_result(request, result)
                 return result
 
+        duplicate = self._duplicate_by_name(best_candidate)
+        if duplicate is not None:
+            result = CraftResult(
+                success=True,
+                result=self._result_object(duplicate),
+                decision="merged_existing",
+                cached=False,
+                candidate=best_candidate,
+                matched_object_id=duplicate.id,
+                score_breakdown=best_match.score if best_match else None,
+                top_matches=top_matches[:5],
+                explanation=self._merge_explanation(best_candidate, duplicate),
+            )
+            if request.options.persist:
+                self.store.save_craft_result(request, result)
+            return result
+
         created = self._construct_new_object(best_candidate)
         result = CraftResult(
             success=True,
             result=created,
-            decision="created_new",
+            decision="created_pending",
             cached=False,
             candidate=best_candidate,
             score_breakdown=best_match.score if best_match else None,
@@ -186,12 +203,21 @@ class RuleSynthesizerEngine:
             discovery_method="local_engine",
             is_first_discoverer=True,
             category_ids=[],
+            status="pending",
+            quality_flags=["pending_review"],
         )
 
     def _result_object(self, obj: SynthObject) -> SynthObject:
         # 完整对象可能带大量 craft_sources，响应只保留稳定字段。
         payload = obj.model_dump(mode="json", exclude={"craft_sources"})
         return SynthObject.model_validate(payload)
+
+    def _duplicate_by_name(self, candidate: CandidateObject) -> SynthObject | None:
+        matches = self.store.get_by_name(candidate.name)
+        for match in matches:
+            if match.type == candidate.type:
+                return match
+        return None
 
     def _match_explanation(
         self,
@@ -206,6 +232,9 @@ class RuleSynthesizerEngine:
             f"因此返回已有对象。"
         )
 
+    def _merge_explanation(self, candidate: CandidateObject, duplicate: SynthObject) -> str:
+        return f"候选「{candidate.name}」与已有 active 对象「{duplicate.name}」名称归一化一致，因此归并到 canonical 对象。"
+
     def _create_explanation(
         self,
         request: CraftRequest,
@@ -213,8 +242,8 @@ class RuleSynthesizerEngine:
         match: MatchScore | None,
     ) -> str:
         if match is None:
-            return f"未召回足够相近的已有对象，按候选「{candidate.name}」创建新对象。"
+            return f"未召回足够相近的已有对象，按候选「{candidate.name}」创建 pending 对象，等待质量确认。"
         return (
             f"最佳已有对象「{match.name}」评分 {match.score.total:.2f}，未达到命中阈值 "
-            f"{request.options.match_threshold:.2f}。因此按候选「{candidate.name}」创建新对象。"
+            f"{request.options.match_threshold:.2f}。因此按候选「{candidate.name}」创建 pending 对象，等待质量确认。"
         )

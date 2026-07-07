@@ -120,6 +120,14 @@ class SQLiteObjectStore:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS object_aliases (
+                alias TEXT PRIMARY KEY,
+                normalized_alias TEXT NOT NULL,
+                object_id INTEGER NOT NULL,
+                source TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS craft_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 request_json TEXT NOT NULL,
@@ -161,6 +169,7 @@ class SQLiteObjectStore:
 
             CREATE INDEX IF NOT EXISTS idx_objects_normalized_name ON objects(normalized_name);
             CREATE INDEX IF NOT EXISTS idx_objects_type ON objects(type);
+            CREATE INDEX IF NOT EXISTS idx_object_aliases_normalized ON object_aliases(normalized_alias);
             CREATE INDEX IF NOT EXISTS idx_route_edges_inputs ON route_edges(a_id, b_id, operation);
             CREATE INDEX IF NOT EXISTS idx_route_edges_result ON route_edges(result_id);
             CREATE INDEX IF NOT EXISTS idx_embeddings_owner ON embeddings(owner_type, owner_id, model, status);
@@ -365,12 +374,15 @@ class SQLiteObjectStore:
                 result.result = saved_result
                 result_json = result.model_dump_json()
 
-            if result.decision == "created_new":
+            if result.decision in {"created_new", "created_pending"}:
                 self._upsert_object(saved_result, saved_result.model_dump(mode="json"))
+            if result.decision == "merged_existing" and result.candidate is not None:
+                self._insert_object_alias(result.candidate.name, saved_result.id, source="local_engine")
 
             a_id = request.ingredient_a.id
             b_id = request.ingredient_b.id
             if a_id is not None and b_id is not None and saved_result.id is not None:
+                route_status = "disabled" if result.decision == "created_pending" or saved_result.status != "active" else "active"
                 # 成功合成同时写入图证据和精确 recipe cache。
                 self._insert_route_edge(
                     RouteEdge(
@@ -387,6 +399,7 @@ class SQLiteObjectStore:
                         b_name=request.ingredient_b.name,
                         b_type=request.ingredient_b.type,
                         b_description=request.ingredient_b.description,
+                        status=route_status,
                     ),
                     source="local_engine",
                 )
@@ -399,6 +412,48 @@ class SQLiteObjectStore:
                 (request_json, result_json, score_json, now),
             )
         self.rebuild_indexes()
+
+    def promote_pending_object(self, object_id: ObjectId) -> SynthObject:
+        obj = self.all_objects_by_id.get(object_id)
+        if obj is None:
+            raise ValueError(f"object not found: {object_id}")
+        if obj.status != "pending":
+            raise ValueError(f"object is not pending: {object_id}")
+
+        promoted = obj.model_copy(update={"status": "active", "quality_flags": []})
+        now = _utc_now()
+        with self.conn:
+            self._upsert_object(promoted, promoted.model_dump(mode="json"))
+            rows = self.conn.execute(
+                """
+                SELECT a_id, b_id, operation
+                FROM route_edges
+                WHERE result_id = ? AND status = 'disabled'
+                """,
+                (object_id,),
+            ).fetchall()
+            self.conn.execute(
+                """
+                UPDATE route_edges
+                SET status = 'active'
+                WHERE result_id = ? AND status = 'disabled'
+                """,
+                (object_id,),
+            )
+            for row in rows:
+                key = recipe_key(int(row["a_id"]), int(row["b_id"]), row["operation"])
+                self.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO recipe_cache(recipe_key, a_id, b_id, operation, result_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (key, row["a_id"], row["b_id"], row["operation"], object_id, now),
+                )
+        self.rebuild_indexes()
+        result = self.get_object(object_id)
+        if result is None:
+            raise RuntimeError(f"promoted object is not visible online: {object_id}")
+        return result
 
     def next_local_id(self) -> int:
         row = self.conn.execute("SELECT MIN(id) AS min_id FROM objects").fetchone()
@@ -506,6 +561,15 @@ class SQLiteObjectStore:
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (key, edge.a_id, edge.b_id, edge.operation, edge.result_id, _utc_now()),
+        )
+
+    def _insert_object_alias(self, alias: str, object_id: ObjectId, source: str) -> None:
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO object_aliases(alias, normalized_alias, object_id, source, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (alias, normalize_name(alias), object_id, source, _utc_now()),
         )
 
     def _object_from_row(self, row: sqlite3.Row) -> SynthObject:

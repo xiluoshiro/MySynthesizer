@@ -14,7 +14,7 @@ from mysynth.embeddings import (
 )
 from mysynth.engine import RuleSynthesizerEngine
 from mysynth.evaluation import evaluate_routes
-from mysynth.models import CandidateObject, CraftOptions, CraftRequest
+from mysynth.models import CandidateObject, CraftOptions, CraftRequest, SynthObject
 from mysynth.store import SQLiteObjectStore
 
 
@@ -308,8 +308,8 @@ class EngineScenarioTests(unittest.TestCase):
 
         self.assertNotIn(5, {obj.id for obj in retrieved})
 
-    # 测试点：未命中缓存且禁用持久化时会生成本地候选但不写入 SQLite。
-    def test_uncached_no_persist_creates_transient_candidate(self) -> None:
+    # 测试点：未命中缓存且禁用持久化时会生成 transient pending 候选但不写入 SQLite。
+    def test_uncached_no_persist_creates_transient_pending_candidate(self) -> None:
         water = self.store.get_object(1)
         hydrogen = self.store.get_object(3)
         self.assertIsNotNone(water)
@@ -325,9 +325,91 @@ class EngineScenarioTests(unittest.TestCase):
         )
 
         self.assertTrue(result.success)
-        self.assertEqual(result.decision, "created_new")
+        self.assertEqual(result.decision, "created_pending")
         self.assertIsNone(result.result.id)
+        self.assertEqual(result.result.status, "pending")
         self.assertIsNone(self.store.find_recipe("subtract:1:3"))
+
+    # 测试点：pending 新对象持久化后不会进入默认在线对象、active route 或 recipe cache。
+    def test_created_pending_persists_without_active_recall_or_cache(self) -> None:
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+
+        result = RuleSynthesizerEngine(self.store).craft(
+            CraftRequest(operation="subtract", ingredient_a=fire, ingredient_b=hydrogen)
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.decision, "created_pending")
+        self.assertIsNotNone(result.result.id)
+        self.assertEqual(result.result.status, "pending")
+        self.assertIsNone(self.store.get_object(result.result.id))
+        self.assertEqual(self.store.all_objects_by_id[result.result.id].status, "pending")
+        self.assertIsNone(self.store.find_recipe("subtract:2:3"))
+
+        edge_row = self.store.conn.execute(
+            "SELECT status FROM route_edges WHERE a_id = ? AND b_id = ? AND operation = ? AND result_id = ?",
+            (2, 3, "subtract", result.result.id),
+        ).fetchone()
+        self.assertIsNotNone(edge_row)
+        self.assertEqual(edge_row["status"], "disabled")
+
+    # 测试点：promote 会把 pending 对象、disabled route 和 recipe cache 一起激活。
+    def test_promote_pending_object_activates_route_and_cache(self) -> None:
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+        result = RuleSynthesizerEngine(self.store).craft(
+            CraftRequest(operation="subtract", ingredient_a=fire, ingredient_b=hydrogen)
+        )
+        pending_id = result.result.id
+        self.assertIsNotNone(pending_id)
+
+        promoted = self.store.promote_pending_object(pending_id)
+
+        self.assertEqual(promoted.status, "active")
+        self.assertEqual(promoted.quality_flags, [])
+        self.assertIsNotNone(self.store.get_object(pending_id))
+        self.assertIsNotNone(self.store.find_recipe("subtract:2:3"))
+        edges = self.store.find_edges_by_inputs(2, 3, "subtract")
+        self.assertEqual([edge.result_id for edge in edges], [pending_id])
+
+    # 测试点：promote 只接受 pending 对象，避免误改 active 事实。
+    def test_promote_rejects_non_pending_object(self) -> None:
+        with self.assertRaises(ValueError):
+            self.store.promote_pending_object(1)
+
+    # 测试点：候选名称与 active 对象归一化一致时会归并到已有 canonical 对象。
+    def test_duplicate_candidate_name_merges_existing_object(self) -> None:
+        duplicate = SynthObject(
+            id=10,
+            name="无氢气水",
+            emoji="💧",
+            type="element",
+            description="已有 canonical 对象。",
+            source="test",
+        )
+        self.store._upsert_object(duplicate, duplicate.model_dump(mode="json"))
+        self.store.rebuild_indexes()
+        water = self.store.get_object(1)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(water)
+        self.assertIsNotNone(hydrogen)
+
+        result = RuleSynthesizerEngine(self.store).craft(
+            CraftRequest(operation="subtract", ingredient_a=water, ingredient_b=hydrogen)
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.decision, "merged_existing")
+        self.assertEqual(result.result.id, 10)
+        self.assertIsNotNone(self.store.find_recipe("subtract:1:3"))
+        alias_row = self.store.conn.execute("SELECT object_id FROM object_aliases WHERE alias = ?", ("无氢气水",)).fetchone()
+        self.assertIsNotNone(alias_row)
+        self.assertEqual(alias_row["object_id"], 10)
 
     # 测试点：回放评估会把 recipe cache 命中计入 exact 和 top5 指标。
     def test_route_replay_counts_cache_hits(self) -> None:
