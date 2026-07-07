@@ -30,6 +30,12 @@ class WorkbenchService:
             objects = list(self.store.list_objects())[:limit]
         return {"objects": [_public_object(obj) for obj in objects]}
 
+    def get_object_detail(self, object_id: int) -> dict[str, object]:
+        obj = self.store.get_object(object_id) or self.store.all_objects_by_id.get(object_id)
+        if obj is None:
+            raise ValueError("object id not found")
+        return {"object": obj.model_dump(mode="json", exclude={"craft_sources"})}
+
     def craft(self, payload: dict[str, object]) -> dict[str, object]:
         a_id = int(payload["a_id"])
         b_id = int(payload["b_id"])
@@ -105,14 +111,21 @@ def main() -> None:
 def _handler(service: WorkbenchService, ui_dir: Path) -> type[BaseHTTPRequestHandler]:
     class WorkbenchHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            parsed = urlparse(self.path)
-            if parsed.path == "/api/search":
-                params = parse_qs(parsed.query)
-                query = params.get("q", [""])[0]
-                limit = int(params.get("limit", ["20"])[0])
-                self._json(service.search_objects(query, limit=limit))
-                return
-            self._static(parsed.path)
+            try:
+                parsed = urlparse(self.path)
+                if parsed.path == "/api/search":
+                    params = parse_qs(parsed.query)
+                    query = params.get("q", [""])[0]
+                    limit = int(params.get("limit", ["20"])[0])
+                    self._json(service.search_objects(query, limit=limit))
+                    return
+                if parsed.path.startswith("/api/objects/"):
+                    object_id = int(parsed.path.rsplit("/", 1)[-1])
+                    self._json(service.get_object_detail(object_id))
+                    return
+                self._static(parsed.path)
+            except Exception as exc:
+                self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)

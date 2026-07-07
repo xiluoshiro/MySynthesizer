@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -36,13 +37,13 @@ def main() -> int:
         print(json.dumps({"ok": all(checks.values()), "plan": plan, "checks": checks}, ensure_ascii=False, indent=2))
         return 0
 
-    pyinstaller = shutil.which("pyinstaller")
+    pyinstaller = _pyinstaller_command()
     if pyinstaller is None:
         print("pyinstaller not found; install it or run with --dry-run", file=sys.stderr)
         return 2
 
     command = [
-        pyinstaller,
+        *pyinstaller,
         "--noconfirm",
         "--name",
         args.name,
@@ -53,6 +54,15 @@ def main() -> int:
         str(ENTRY_SCRIPT),
     ]
     return subprocess.run(command, cwd=ROOT, check=False).returncode
+
+
+def _pyinstaller_command() -> list[str] | None:
+    executable = shutil.which("pyinstaller")
+    if executable is not None:
+        return [executable]
+    if importlib.util.find_spec("PyInstaller") is not None:
+        return [sys.executable, "-m", "PyInstaller"]
+    return None
 
 
 if __name__ == "__main__":

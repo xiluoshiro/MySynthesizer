@@ -916,14 +916,22 @@ flowchart TD
 
 - 提供 `python -B -m mysynth workbench` 本地入口。
 - exe 进程内启动 loopback 小服务，托管 `ui/` 静态 HTML/JS/CSS。
-- UI 第一版支持搜索对象、选择 A/B、选择 add/subtract、执行 craft、展示 result/decision/explanation/top_matches。
+- UI 第一版支持搜索对象、查看对象详情、选择 A/B、选择 add/subtract、执行 craft、展示 result/decision/explanation/top_matches。
 - UI 第一版支持 pending 的 promote/reject/merge。
 - 提供 `scripts/build_desktop.py --dry-run` 输出打包计划。
 - 后续用 PyInstaller 输出 `dist/MySynthesizer/MySynthesizer.exe`，并带上 `data/` 和 `ui/`。
 
+当前实现状态：
+
+- 已新增 `/api/objects/{id}` 本地详情接口，供 UI 展示对象稳定字段。
+- craft 结果已从纯 JSON 输出改为结构化摘要、解释、top matches 和可展开原始结果。
+- `workbench` 使用单线程 `HTTPServer`，避免 SQLite 连接跨线程导致请求断开。
+- 当前环境未安装 PyInstaller，真实 exe 构建尚未执行；dry-run 和入口检查已通过。
+
 验收：
 
 - 本地 workbench 入口能完成一次 craft。
+- 本地 workbench HTTP 搜索和对象详情接口可访问。
 - UI 调用的本地接口不绕过 engine 和 store。
 - dry-run 能检查打包入口、UI 目录和数据目录。
 - 实际 PyInstaller 构建后能用同一份 SQLite 数据启动。

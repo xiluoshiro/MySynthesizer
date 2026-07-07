@@ -726,8 +726,15 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertEqual(result["result"]["id"], 1)
         self.assertTrue(result["cached"])
 
+    # 测试点：WorkbenchService 能读取对象详情供本地 UI 展示。
+    def test_workbench_service_returns_object_detail(self) -> None:
+        result = WorkbenchService(self.store).get_object_detail(1)
+
+        self.assertEqual(result["object"]["name"], "水")
+        self.assertEqual(result["object"]["status"], "active")
+
     # 测试点：workbench HTTP 入口启动后能访问搜索接口，避免 SQLite 跨线程访问。
-    def test_workbench_http_search_endpoint_responds(self) -> None:
+    def test_workbench_http_endpoints_respond(self) -> None:
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -753,9 +760,12 @@ class EngineScenarioTests(unittest.TestCase):
             line = process.stdout.readline()
             payload = json.loads(line)
             with urllib.request.urlopen(f"{payload['url']}api/search?q=%E6%B0%B4&limit=1", timeout=5) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                search_data = json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(f"{payload['url']}api/objects/1", timeout=5) as response:
+                detail_data = json.loads(response.read().decode("utf-8"))
 
-            self.assertIn("objects", data)
+            self.assertIn("objects", search_data)
+            self.assertEqual(detail_data["object"]["name"], "水")
         finally:
             process.terminate()
             try:

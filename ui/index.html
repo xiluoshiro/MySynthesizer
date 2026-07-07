@@ -27,6 +27,7 @@
             <button id="searchButton" type="button">搜索</button>
           </div>
           <div id="results" class="results"></div>
+          <section id="objectDetail" class="detail empty"></section>
         </aside>
 
         <section class="panel main-panel">
@@ -43,7 +44,12 @@
             </div>
           </div>
           <button id="craftButton" class="primary" type="button">合成</button>
-          <pre id="output" class="output"></pre>
+          <section id="craftSummary" class="summary empty"></section>
+          <section id="topMatches" class="matches"></section>
+          <details class="raw">
+            <summary>原始结果</summary>
+            <pre id="output" class="output"></pre>
+          </details>
         </section>
 
         <aside class="panel">
