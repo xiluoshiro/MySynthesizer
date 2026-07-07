@@ -1,21 +1,29 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tempfile
+import urllib.request
 import unittest
 from pathlib import Path
 
 from mysynth.embeddings import (
     EMBEDDING_STATUS_ACTIVE,
     EMBEDDING_STATUS_STALE,
+    EmbeddingText,
     FakeEmbeddingProvider,
     SQLiteEmbeddingStore,
+    SQLiteVectorIndex,
+    build_candidate_embedding_text,
     build_object_embedding_text,
+    build_request_embedding_text,
 )
 from mysynth.engine import RuleSynthesizerEngine
 from mysynth.evaluation import evaluate_routes
 from mysynth.models import CandidateObject, CraftOptions, CraftRequest, SynthObject
 from mysynth.store import SQLiteObjectStore
+from mysynth.workbench import WorkbenchService
 
 
 def _write_graph(path: Path) -> None:
@@ -174,6 +182,14 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertIn("火", names)
         self.assertIn("氢气", names)
 
+    # 测试点：本地文本搜索会召回 active 对象，并过滤 inactive 对象。
+    def test_store_search_text_uses_local_index_and_filters_inactive(self) -> None:
+        matches = self.store.search_text("清洁能源 特殊待定", limit=10)
+        names = {obj.name for obj in matches}
+
+        self.assertIn("氢气", names)
+        self.assertNotIn("待定水", names)
+
     # 测试点：默认在线视图会隔离 pending 对象，避免进入查询和召回。
     def test_store_filters_inactive_objects_from_online_view(self) -> None:
         self.assertIsNone(self.store.get_object(6))
@@ -307,6 +323,182 @@ class EngineScenarioTests(unittest.TestCase):
         )
 
         self.assertNotIn(5, {obj.id for obj in retrieved})
+
+    # 测试点：显式开启 vector 时 object top-k 结果会作为候选证据进入召回池。
+    def test_vector_object_retrieval_adds_candidate_evidence_when_enabled(self) -> None:
+        vector_only = SynthObject(
+            id=10,
+            name="向量专用对象",
+            emoji="💡",
+            type="item",
+            description="只通过向量召回的对象。",
+            source="test",
+        )
+        self.store._upsert_object(vector_only, vector_only.model_dump(mode="json"))
+        self.store.rebuild_indexes()
+        candidate = CandidateObject(
+            name="zz_vector_candidate",
+            type="concept",
+            description="zz_vector_candidate",
+            core_tags=["zz_vector_candidate"],
+            source_reason="test",
+        )
+        provider = FakeEmbeddingProvider(dimensions=8)
+        embedding_store = SQLiteEmbeddingStore(self.store.conn)
+        candidate_text = build_candidate_embedding_text(candidate)
+        embedding_store.ensure_embedding(
+            EmbeddingText(
+                owner_type="object",
+                owner_id=str(vector_only.id),
+                text=candidate_text.text,
+                text_hash=candidate_text.text_hash,
+            ),
+            provider,
+        )
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+
+        retrieved = RuleSynthesizerEngine(
+            self.store,
+            vector_index=SQLiteVectorIndex(self.store.conn),
+            embedding_provider=provider,
+        )._retrieve_for_candidate(
+            candidate,
+            CraftRequest(
+                operation="subtract",
+                ingredient_a=fire,
+                ingredient_b=hydrogen,
+                options=CraftOptions(persist=False, vector_top_k=1, use_vectors=True),
+            ),
+        )
+
+        self.assertIn(vector_only.id, {obj.id for obj in retrieved})
+
+    # 测试点：默认 craft 召回不启用 vector，避免 fake embedding 成为主路径。
+    def test_vector_retrieval_is_disabled_by_default(self) -> None:
+        vector_only = SynthObject(
+            id=11,
+            name="默认关闭向量对象",
+            emoji="💡",
+            type="item",
+            description="只通过向量召回的对象。",
+            source="test",
+        )
+        self.store._upsert_object(vector_only, vector_only.model_dump(mode="json"))
+        self.store.rebuild_indexes()
+        candidate = CandidateObject(
+            name="zz_default_vector_candidate",
+            type="concept",
+            description="zz_default_vector_candidate",
+            core_tags=["zz_default_vector_candidate"],
+            source_reason="test",
+        )
+        provider = FakeEmbeddingProvider(dimensions=8)
+        candidate_text = build_candidate_embedding_text(candidate)
+        SQLiteEmbeddingStore(self.store.conn).ensure_embedding(
+            EmbeddingText(
+                owner_type="object",
+                owner_id=str(vector_only.id),
+                text=candidate_text.text,
+                text_hash=candidate_text.text_hash,
+            ),
+            provider,
+        )
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+
+        retrieved = RuleSynthesizerEngine(
+            self.store,
+            vector_index=SQLiteVectorIndex(self.store.conn),
+            embedding_provider=provider,
+        )._retrieve_for_candidate(
+            candidate,
+            CraftRequest(
+                operation="subtract",
+                ingredient_a=fire,
+                ingredient_b=hydrogen,
+                options=CraftOptions(persist=False, vector_top_k=1),
+            ),
+        )
+
+        self.assertNotIn(vector_only.id, {obj.id for obj in retrieved})
+
+    # 测试点：recipe vector top-k 结果只作为相似历史结果进入召回池。
+    def test_vector_recipe_retrieval_adds_result_evidence(self) -> None:
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+        request = CraftRequest(
+            operation="subtract",
+            ingredient_a=fire,
+            ingredient_b=hydrogen,
+            options=CraftOptions(persist=False, vector_top_k=1, use_vectors=True),
+        )
+        provider = FakeEmbeddingProvider(dimensions=8)
+        embedding_store = SQLiteEmbeddingStore(self.store.conn)
+        request_text = build_request_embedding_text(request)
+        embedding_store.ensure_embedding(
+            EmbeddingText(
+                owner_type="recipe",
+                owner_id="subtract:2:3:1",
+                text=request_text.text,
+                text_hash=request_text.text_hash,
+            ),
+            provider,
+        )
+        candidate = CandidateObject(
+            name="zz_recipe_vector_candidate",
+            type="concept",
+            description="zz_recipe_vector_candidate",
+            core_tags=["zz_recipe_vector_candidate"],
+            source_reason="test",
+        )
+
+        retrieved = RuleSynthesizerEngine(
+            self.store,
+            vector_index=SQLiteVectorIndex(self.store.conn),
+            embedding_provider=provider,
+        )._retrieve_for_candidate(candidate, request)
+
+        self.assertIn(1, {obj.id for obj in retrieved})
+
+    # 测试点：recipe cache 命中时不会被冲突的 vector 相似结果覆盖。
+    def test_recipe_cache_wins_over_conflicting_vector_result(self) -> None:
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+        request = CraftRequest(
+            operation="add",
+            ingredient_a=fire,
+            ingredient_b=hydrogen,
+            options=CraftOptions(persist=False, vector_top_k=1, use_vectors=True),
+        )
+        provider = FakeEmbeddingProvider(dimensions=8)
+        request_text = build_request_embedding_text(request)
+        SQLiteEmbeddingStore(self.store.conn).ensure_embedding(
+            EmbeddingText(
+                owner_type="recipe",
+                owner_id="add:2:3:5",
+                text=request_text.text,
+                text_hash=request_text.text_hash,
+            ),
+            provider,
+        )
+
+        result = RuleSynthesizerEngine(
+            self.store,
+            vector_index=SQLiteVectorIndex(self.store.conn),
+            embedding_provider=provider,
+        ).craft(request)
+
+        self.assertTrue(result.cached)
+        self.assertEqual(result.result.id, 1)
 
     # 测试点：未命中缓存且禁用持久化时会生成 transient pending 候选但不写入 SQLite。
     def test_uncached_no_persist_creates_transient_pending_candidate(self) -> None:
@@ -508,6 +700,88 @@ class EngineScenarioTests(unittest.TestCase):
 
         self.assertEqual(embedding_store.count_by_status(EMBEDDING_STATUS_ACTIVE), 1)
         self.assertEqual(embedding_store.count_by_status(EMBEDDING_STATUS_STALE), 1)
+
+    # 测试点：vector search 会按模型维度过滤，避免不同维度向量互相召回。
+    def test_vector_search_filters_by_dimensions(self) -> None:
+        water = self.store.get_object(1)
+        self.assertIsNotNone(water)
+        provider8 = FakeEmbeddingProvider(dimensions=8)
+        provider16 = FakeEmbeddingProvider(dimensions=16)
+        SQLiteEmbeddingStore(self.store.conn).ensure_embedding(build_object_embedding_text(water), provider8)
+
+        results = SQLiteVectorIndex(self.store.conn).search_text(
+            build_object_embedding_text(water),
+            provider16,
+            owner_type="object",
+            top_k=5,
+        )
+
+        self.assertEqual(results, [])
+
+    # 测试点：WorkbenchService 能通过本地 API 边界完成一次 craft。
+    def test_workbench_service_can_craft_once(self) -> None:
+        result = WorkbenchService(self.store).craft({"a_id": 2, "b_id": 3, "operation": "add", "persist": False})
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["result"]["id"], 1)
+        self.assertTrue(result["cached"])
+
+    # 测试点：workbench HTTP 入口启动后能访问搜索接口，避免 SQLite 跨线程访问。
+    def test_workbench_http_search_endpoint_responds(self) -> None:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "mysynth",
+                "--db",
+                str(self.db_path),
+                "--source",
+                str(self.graph_path),
+                "workbench",
+                "--port",
+                "0",
+                "--no-browser",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            self.assertIsNotNone(process.stdout)
+            line = process.stdout.readline()
+            payload = json.loads(line)
+            with urllib.request.urlopen(f"{payload['url']}api/search?q=%E6%B0%B4&limit=1", timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+            self.assertIn("objects", data)
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+    # 测试点：桌面打包脚本 dry-run 会输出单机包结构计划。
+    def test_build_desktop_dry_run_reports_package_plan(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-B", "scripts/build_desktop.py", "--dry-run"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        payload = json.loads(completed.stdout)
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertTrue(payload["ok"])
+        self.assertIn("ui", payload["plan"])
 
 
 if __name__ == "__main__":

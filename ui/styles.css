@@ -1,0 +1,185 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  color: #1f2933;
+  background: #eef2f5;
+}
+
+.app {
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 auto 18px;
+  max-width: 1280px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 700;
+}
+
+p {
+  margin: 4px 0 0;
+  color: #64748b;
+}
+
+.mode,
+.review-actions,
+.search-row {
+  display: flex;
+  gap: 8px;
+}
+
+button,
+input {
+  min-height: 38px;
+  border: 1px solid #cbd5df;
+  border-radius: 6px;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: #fff;
+  padding: 0 14px;
+}
+
+button.active,
+.primary {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #fff;
+}
+
+input {
+  width: 100%;
+  padding: 0 10px;
+  background: #fff;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) 1fr minmax(260px, 320px);
+  gap: 16px;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.panel {
+  min-width: 0;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #fff;
+  padding: 16px;
+}
+
+.main-panel {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.results {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  max-height: 68vh;
+  overflow: auto;
+}
+
+.result {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 10px;
+  text-align: left;
+}
+
+.result strong {
+  overflow-wrap: anywhere;
+}
+
+.result small,
+.slot small {
+  color: #64748b;
+  line-height: 1.4;
+}
+
+.slots {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.slot {
+  min-height: 120px;
+  border: 1px dashed #aab7c4;
+  border-radius: 8px;
+  padding: 14px;
+  background: #f8fafc;
+}
+
+.slot span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
+.slot strong {
+  display: block;
+  margin-top: 10px;
+  overflow-wrap: anywhere;
+}
+
+.output {
+  min-height: 240px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #111827;
+  color: #d1fae5;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.output.small {
+  min-height: 160px;
+  margin-top: 10px;
+}
+
+@media (max-width: 980px) {
+  .workspace,
+  .slots {
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

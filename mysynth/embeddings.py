@@ -37,6 +37,14 @@ class EmbeddingRecord:
     vector: list[float]
 
 
+@dataclass(frozen=True)
+class VectorSearchResult:
+    owner_type: str
+    owner_id: str
+    score: float
+    embedding_id: int
+
+
 class EmbeddingProvider(Protocol):
     model: str
     dimensions: int
@@ -144,6 +152,54 @@ class SQLiteEmbeddingStore:
         return int(row["count"])
 
 
+class SQLiteVectorIndex:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def search_vector(
+        self,
+        query_vector: list[float],
+        *,
+        owner_type: str,
+        model: str,
+        top_k: int,
+    ) -> list[VectorSearchResult]:
+        if top_k <= 0 or not query_vector:
+            return []
+        rows = self.conn.execute(
+            """
+            SELECT id, owner_type, owner_id, vector_json
+            FROM embeddings
+            WHERE owner_type = ? AND model = ? AND dimensions = ? AND status = ?
+            """,
+            (owner_type, model, len(query_vector), EMBEDDING_STATUS_ACTIVE),
+        ).fetchall()
+        results: list[VectorSearchResult] = []
+        for row in rows:
+            vector = json.loads(row["vector_json"])
+            score = cosine_similarity(query_vector, vector)
+            results.append(
+                VectorSearchResult(
+                    owner_type=row["owner_type"],
+                    owner_id=row["owner_id"],
+                    score=round(score, 6),
+                    embedding_id=int(row["id"]),
+                )
+            )
+        results.sort(key=lambda item: item.score, reverse=True)
+        return results[:top_k]
+
+    def search_text(
+        self,
+        text: EmbeddingText,
+        provider: EmbeddingProvider,
+        *,
+        owner_type: str,
+        top_k: int,
+    ) -> list[VectorSearchResult]:
+        return self.search_vector(provider.embed(text.text), owner_type=owner_type, model=provider.model, top_k=top_k)
+
+
 def build_object_embedding_text(obj: SynthObject) -> EmbeddingText:
     # 对象向量文本使用稳定字段标签，便于比较模型变化。
     text = normalize_text(
@@ -218,6 +274,14 @@ def build_request_embedding_text(request: CraftRequest) -> EmbeddingText:
 
 def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left)) or 1.0
+    right_norm = math.sqrt(sum(value * value for value in right)) or 1.0
+    return sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
 
 
 def _record_from_row(row: sqlite3.Row) -> EmbeddingRecord:

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MySynthesizer Workbench</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="toolbar">
+        <div>
+          <h1>MySynthesizer</h1>
+          <p>本地单机合成器工作台</p>
+        </div>
+        <div class="mode">
+          <button id="opAdd" class="active" type="button">add</button>
+          <button id="opSubtract" type="button">subtract</button>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <aside class="panel">
+          <label for="searchInput">搜索对象</label>
+          <div class="search-row">
+            <input id="searchInput" type="search" placeholder="名称、描述、type" />
+            <button id="searchButton" type="button">搜索</button>
+          </div>
+          <div id="results" class="results"></div>
+        </aside>
+
+        <section class="panel main-panel">
+          <div class="slots">
+            <div class="slot">
+              <span>A</span>
+              <strong id="slotAName">未选择</strong>
+              <small id="slotADesc"></small>
+            </div>
+            <div class="slot">
+              <span>B</span>
+              <strong id="slotBName">未选择</strong>
+              <small id="slotBDesc"></small>
+            </div>
+          </div>
+          <button id="craftButton" class="primary" type="button">合成</button>
+          <pre id="output" class="output"></pre>
+        </section>
+
+        <aside class="panel">
+          <label>审核 pending</label>
+          <input id="reviewId" type="number" placeholder="pending id" />
+          <input id="canonicalId" type="number" placeholder="canonical id" />
+          <input id="rejectReason" type="text" placeholder="reject reason" />
+          <div class="review-actions">
+            <button id="promoteButton" type="button">promote</button>
+            <button id="rejectButton" type="button">reject</button>
+            <button id="mergeButton" type="button">merge</button>
+          </div>
+          <pre id="reviewOutput" class="output small"></pre>
+        </aside>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

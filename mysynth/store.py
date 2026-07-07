@@ -34,6 +34,9 @@ class ObjectStore(Protocol):
     def search_by_type_and_tokens(self, synth_type: str, tokens: Iterable[str], limit: int) -> list[SynthObject]:
         ...
 
+    def search_text(self, query: str, limit: int) -> list[SynthObject]:
+        ...
+
     def find_recipe(self, key: RecipeKey) -> SynthObject | None:
         ...
 
@@ -62,6 +65,7 @@ class SQLiteObjectStore:
         self.type_index: dict[str, set[ObjectId]] = defaultdict(set)
         self.recipe_index: dict[RecipeKey, ObjectId] = {}
         self.neighbors_by_object: dict[ObjectId, set[ObjectId]] = defaultdict(set)
+        self.fts_enabled = False
 
     def initialize(self, force_import: bool = False) -> None:
         self._create_schema()
@@ -177,6 +181,7 @@ class SQLiteObjectStore:
             """
         )
         self._ensure_schema_columns()
+        self._ensure_fts_table()
         self.conn.commit()
 
     def _ensure_schema_columns(self) -> None:
@@ -189,6 +194,19 @@ class SQLiteObjectStore:
         columns = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in columns:
             self.conn.execute(sql)
+
+    def _ensure_fts_table(self) -> None:
+        try:
+            self.conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS object_fts
+                USING fts5(object_id UNINDEXED, name, type, search_text)
+                """
+            )
+        except sqlite3.OperationalError:
+            self.fts_enabled = False
+            return
+        self.fts_enabled = True
 
     def _object_count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS count FROM objects").fetchone()
@@ -207,6 +225,8 @@ class SQLiteObjectStore:
                 self.conn.execute("DELETE FROM route_edges")
                 self.conn.execute("DELETE FROM object_payloads")
                 self.conn.execute("DELETE FROM objects")
+                if self.fts_enabled:
+                    self.conn.execute("DELETE FROM object_fts")
             for payload in objects:
                 obj = SynthObject.model_validate(payload)
                 if obj.id is None:
@@ -323,6 +343,37 @@ class SQLiteObjectStore:
                         return [self.objects_by_id[item] for item in ids]
         return [self.objects_by_id[item] for item in ids]
 
+    def search_text(self, query: str, limit: int) -> list[SynthObject]:
+        if limit <= 0:
+            return []
+        if self.fts_enabled:
+            fts_query = _fts_query(query)
+            if fts_query:
+                rows = self.conn.execute(
+                    """
+                    SELECT object_id
+                    FROM object_fts
+                    WHERE object_fts MATCH ?
+                    LIMIT ?
+                    """,
+                    (fts_query, limit),
+                ).fetchall()
+                results = [self.get_object(int(row["object_id"])) for row in rows]
+                objects = [obj for obj in results if obj is not None]
+                if objects:
+                    return objects
+
+        ids: list[ObjectId] = []
+        seen: set[ObjectId] = set()
+        for token in tokenize(query):
+            for object_id in self.token_index.get(token.casefold(), set()):
+                if object_id not in seen and object_id in self.objects_by_id:
+                    seen.add(object_id)
+                    ids.append(object_id)
+                    if len(ids) >= limit:
+                        return [self.objects_by_id[item] for item in ids]
+        return [self.objects_by_id[item] for item in ids]
+
     def find_recipe(self, key: RecipeKey) -> SynthObject | None:
         result_id = self.recipe_index.get(key)
         if result_id is None:
@@ -341,6 +392,7 @@ class SQLiteObjectStore:
 
         # 先召回精确/文本匹配，再用同 type 对象低置信兜底。
         add_many(self.name_index.get(normalize_name(candidate.name), set()))
+        add_many(obj.id for obj in self.search_text(" ".join([candidate.name, candidate.description, *candidate.core_tags, *candidate.anchors]), limit * 2) if obj.id is not None)
         for token in tokenize(" ".join([candidate.name, candidate.description, *candidate.core_tags, *candidate.anchors])):
             add_many(self.token_index.get(token.casefold(), set()))
             if len(ids) >= limit * 3:
@@ -602,6 +654,7 @@ class SQLiteObjectStore:
             """,
             (obj.status, obj.canonical_id, json.dumps(obj.quality_flags, ensure_ascii=False, separators=(",", ":")), obj.id),
         )
+        self._upsert_object_fts(obj)
 
     def _insert_route_edge(self, edge: RouteEdge, source: str) -> None:
         self.conn.execute(
@@ -642,6 +695,25 @@ class SQLiteObjectStore:
     def _is_online_object(self, obj: SynthObject) -> bool:
         return obj.status == "active" and not obj.is_banned
 
+    def _upsert_object_fts(self, obj: SynthObject) -> None:
+        if not self.fts_enabled or obj.id is None:
+            return
+        self.conn.execute("DELETE FROM object_fts WHERE object_id = ?", (obj.id,))
+        if not self._is_online_object(obj):
+            return
+        self.conn.execute(
+            """
+            INSERT INTO object_fts(object_id, name, type, search_text)
+            VALUES (?, ?, ?, ?)
+            """,
+            (obj.id, obj.name, obj.type, object_search_text(obj)),
+        )
+
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _fts_query(query: str) -> str:
+    tokens = [token for token in tokenize(query) if token]
+    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens[:16])

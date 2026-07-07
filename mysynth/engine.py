@@ -3,6 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from .candidates import EMOJI_BY_TYPE, generate_candidates
+from .embeddings import (
+    EmbeddingProvider,
+    SQLiteVectorIndex,
+    build_candidate_embedding_text,
+    build_request_embedding_text,
+)
 from .features import extract_features
 from .intent import plan_intent
 from .models import CandidateObject, CraftRequest, CraftResult, MatchScore, SynthObject
@@ -12,8 +18,16 @@ from .store import ObjectStore
 
 
 class RuleSynthesizerEngine:
-    def __init__(self, store: ObjectStore) -> None:
+    def __init__(
+        self,
+        store: ObjectStore,
+        *,
+        vector_index: SQLiteVectorIndex | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
+    ) -> None:
         self.store = store
+        self.vector_index = vector_index
+        self.embedding_provider = embedding_provider
 
     def craft(self, request: CraftRequest) -> CraftResult:
         # 先处理失败和缓存路径，避免无谓生成候选。
@@ -170,6 +184,8 @@ class RuleSynthesizerEngine:
 
         # 混合召回：候选文本和 type/token 兜底；不做单边邻接扩散。
         add_many(self.store.search_candidates(candidate, request.options.max_retrieved))
+        add_many(self._vector_objects_for_candidate(candidate, request))
+        add_many(self._vector_recipes_for_request(request))
         add_many(self.store.search_by_type_and_tokens(candidate.type, candidate.core_tags, limit=20))
         return objects[: request.options.max_retrieved]
 
@@ -187,6 +203,45 @@ class RuleSynthesizerEngine:
             if result is not None:
                 return result
         return None
+
+    def _vector_objects_for_candidate(self, candidate: CandidateObject, request: CraftRequest) -> list[SynthObject]:
+        if not request.options.use_vectors or self.vector_index is None or self.embedding_provider is None:
+            return []
+        results = self.vector_index.search_text(
+            build_candidate_embedding_text(candidate),
+            self.embedding_provider,
+            owner_type="object",
+            top_k=request.options.vector_top_k,
+        )
+        objects: list[SynthObject] = []
+        for result in results:
+            try:
+                object_id = int(result.owner_id)
+            except ValueError:
+                continue
+            obj = self.store.get_object(object_id)
+            if obj is not None:
+                objects.append(obj)
+        return objects
+
+    def _vector_recipes_for_request(self, request: CraftRequest) -> list[SynthObject]:
+        if not request.options.use_vectors or self.vector_index is None or self.embedding_provider is None:
+            return []
+        results = self.vector_index.search_text(
+            build_request_embedding_text(request),
+            self.embedding_provider,
+            owner_type="recipe",
+            top_k=request.options.vector_top_k,
+        )
+        objects: list[SynthObject] = []
+        for result in results:
+            result_id = _recipe_result_id(result.owner_id)
+            if result_id is None:
+                continue
+            obj = self.store.get_object(result_id)
+            if obj is not None:
+                objects.append(obj)
+        return objects
 
     def _construct_new_object(self, candidate: CandidateObject) -> SynthObject:
         now = datetime.now(UTC).isoformat()
@@ -247,3 +302,13 @@ class RuleSynthesizerEngine:
             f"最佳已有对象「{match.name}」评分 {match.score.total:.2f}，未达到命中阈值 "
             f"{request.options.match_threshold:.2f}。因此按候选「{candidate.name}」创建 pending 对象，等待质量确认。"
         )
+
+
+def _recipe_result_id(owner_id: str) -> int | None:
+    parts = owner_id.split(":")
+    if len(parts) != 4:
+        return None
+    try:
+        return int(parts[3])
+    except ValueError:
+        return None

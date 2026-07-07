@@ -2,7 +2,7 @@
 
 这个目录用于保存 MySynthesizer 合成路径数据、合成器机制分析，以及后续复刻合成器的设计资料。
 
-当前已开始实现一个本地 Python 合成器引擎原型：读取已有图谱，导入 SQLite，执行 `craft()` 合成流程，并提供 CLI 做单次合成和 route 回放评估。
+当前目标是一个本地单机合成器工作台：读取已有图谱，导入 SQLite，执行 `craft()` 合成流程，并提供 CLI、本地静态 UI 和后续 exe 打包路线。
 
 ## 当前进展
 
@@ -11,17 +11,20 @@
 - Python 包结构和核心数据模型。
 - SQLite 本地存储，覆盖对象、原始 payload、路线边、recipe cache、合成事件、失败记录。
 - 第一版规则合成 pipeline：校验、缓存、特征抽取、意图判断、候选生成、召回、评分、决策、持久化。
-- CLI：`init`、`craft`、`eval`、`embed objects`、`review promote/reject/merge`。
+- CLI：`init`、`craft`、`eval`、`workbench`、`embed objects/recipes`、`review promote/reject/merge`。
 - 评估与测试看护：根目录 `scripts/run_tests.py` 可一键运行语法检查和单元测试。
-- 向量化基础层：embedding 文本构造、fake provider、SQLite sidecar 表、去重和 stale 标记。
+- 向量化实验层：embedding 文本构造、fake provider、SQLite sidecar 表、去重、stale 标记、本地 vector top-k 召回；默认不参与 craft。
 - 质量治理基础闭环：active-only 在线召回、`created_pending`、`merged_existing`、`object_aliases`、disabled route、pending 的 promote/reject/merge 审核命令。
+- 本地 workbench：标准库 loopback HTTP + `ui/` 静态页面，可搜索对象、执行合成和审核 pending。
+- PyInstaller dry-run 打包脚本：`scripts/build_desktop.py --dry-run`。
 
 进行中：
 
-- 真实向量模型、向量库和 LLM 候选生成尚未接入。
+- 单机 UI 仍是第一版，尚未做丰富交互和完整打包验收。
 - 质量治理仍是最小闭环，尚未实现质量评分、审核记录表和批量维护命令。
+- 真实向量模型、ANN 向量库和 LLM 候选生成已降级为远期实验，不是近期主线。
 
-建议下一步进入真实向量检索接口：先定义 `VectorIndex`，再把 object/recipe vector top-k 作为候选证据接入，不能覆盖 `recipe_cache` 的确定结果。
+建议下一步是打磨单机工作台：完善 UI、补对象详情/候选解释展示，并验证 PyInstaller 实际构建。
 
 ## 当前入口
 
@@ -55,7 +58,8 @@ mysynth/
   features.py     规则特征抽取
   intent.py       合成意图判断
   normalize.py    名称、文本、recipe key 标准化
-  embeddings.py   embedding 文本、provider 接口、SQLite sidecar 写入
+  embeddings.py   embedding 文本、provider 接口、SQLite sidecar 和实验 vector 召回
+  workbench.py    本地 loopback HTTP + 静态 UI 托管入口
   evaluation.py   route_edges 回放评估
   cli.py          命令行入口
 ```
@@ -86,6 +90,14 @@ python -B -m mysynth craft --a 2 --b 3396 --operation add --no-persist
 
 示例结果：`火 + 氢气 -> 水`，如果 recipe cache 已有记录，会直接命中已有对象。
 
+启动本地工作台：
+
+```bash
+python -B -m mysynth workbench --port 8765
+```
+
+打开 `http://127.0.0.1:8765/` 后可搜索对象、选择 A/B、执行合成，并审核 pending 对象。
+
 回放评估：
 
 ```bash
@@ -98,9 +110,16 @@ python -B -m mysynth eval --limit 20 --failures 10
 
 ```bash
 python -B -m mysynth embed objects --limit 100
+python -B -m mysynth embed recipes --limit 100
 ```
 
-当前 embedding 命令使用确定性的 `fake-hash-v1` provider，只用于验证 embedding schema、去重和 stale 逻辑；真实向量模型和向量库后续接入。
+当前 embedding 命令使用确定性的 `fake-hash-v1` provider，用 SQLite sidecar 做本地 brute-force top-k；真实向量模型和 ANN 向量库后续接入。
+
+说明：fake embedding 只是测试替身，没有真实语义能力；craft 默认不启用 vector 召回，需要显式传入：
+
+```bash
+python -B -m mysynth craft --a 2 --b 3 --operation add --use-vectors
+```
 
 审核 pending 对象：
 
@@ -118,12 +137,20 @@ python -B -m mysynth review merge --id -1 --canonical-id 1
 python -B scripts/run_tests.py
 ```
 
+检查桌面打包计划：
+
+```bash
+python -B scripts/build_desktop.py --dry-run
+```
+
 说明：
 
 - 当前 CLI 默认读取 `outputs/data/current/mysynthesizer_mine_full_routes_latest.json`。
 - 当前主存储是 SQLite，不需要外部数据库服务。
 - `--no-persist` 用于只看结果、不写入本地 craft 记录。
-- `embed objects` 会写入 SQLite 的 embedding sidecar 表，不调用外部模型。
+- craft 默认不启用 vector 召回；`--use-vectors` 只用于实验。
+- `embed objects/recipes` 会写入 SQLite 的 embedding sidecar 表，不调用外部模型。
+- vector 召回只作为候选证据，不会覆盖 `recipe_cache` 或 direct route 的确定结果。
 - 未命中确定结果的新合成默认进入 `pending`，不会参与 active 召回；需要通过 `review` 命令审核。
 - `scripts/run_tests.py` 是统一测试入口，当前包含语法检查和 `unittest` 发现，后续测试套件继续挂到这里。
 - 在当前 Windows 环境里建议使用 `python -B`，避免写 `__pycache__` 时触发权限问题。

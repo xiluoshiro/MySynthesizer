@@ -48,6 +48,8 @@ class CraftOptions(BaseModel):
     review_threshold: float = 0.62
     max_candidates: int = 10
     max_retrieved: int = 40
+    vector_top_k: int = 10
+    use_vectors: bool = False
     use_llm: bool = False
     explain: bool = True
     persist: bool = True

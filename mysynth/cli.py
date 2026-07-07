@@ -8,12 +8,15 @@ from .embeddings import (
     EMBEDDING_STATUS_ACTIVE,
     FakeEmbeddingProvider,
     SQLiteEmbeddingStore,
+    SQLiteVectorIndex,
     build_object_embedding_text,
+    build_recipe_embedding_text,
 )
 from .engine import RuleSynthesizerEngine
 from .evaluation import evaluate_routes
 from .models import CraftRequest
 from .store import SQLiteObjectStore
+from .workbench import run_workbench
 
 
 def main() -> None:
@@ -30,10 +33,18 @@ def main() -> None:
     craft_parser.add_argument("--b", type=int, required=True)
     craft_parser.add_argument("--operation", choices=["add", "subtract"], required=True)
     craft_parser.add_argument("--no-persist", action="store_true")
+    craft_parser.add_argument("--use-vectors", action="store_true")
+    craft_parser.add_argument("--vector-dimensions", type=int, default=16)
 
     eval_parser = subparsers.add_parser("eval")
     eval_parser.add_argument("--limit", type=int)
     eval_parser.add_argument("--failures", type=int, default=20)
+
+    workbench_parser = subparsers.add_parser("workbench")
+    workbench_parser.add_argument("--host", default="127.0.0.1")
+    workbench_parser.add_argument("--port", type=int, default=8765)
+    workbench_parser.add_argument("--ui-dir", default="ui")
+    workbench_parser.add_argument("--no-browser", action="store_true")
 
     review_parser = subparsers.add_parser("review")
     review_subparsers = review_parser.add_subparsers(dest="review_command", required=True)
@@ -51,8 +62,22 @@ def main() -> None:
     embed_objects_parser = embed_subparsers.add_parser("objects")
     embed_objects_parser.add_argument("--limit", type=int)
     embed_objects_parser.add_argument("--dimensions", type=int, default=16)
+    embed_recipes_parser = embed_subparsers.add_parser("recipes")
+    embed_recipes_parser.add_argument("--limit", type=int)
+    embed_recipes_parser.add_argument("--dimensions", type=int, default=16)
 
     args = parser.parse_args()
+    if args.command == "workbench":
+        run_workbench(
+            db_path=args.db,
+            source_path=args.source,
+            host=args.host,
+            port=args.port,
+            ui_dir=Path(args.ui_dir),
+            open_browser=not args.no_browser,
+        )
+        return
+
     store = SQLiteObjectStore(db_path=args.db, source_path=args.source)
     store.initialize(force_import=getattr(args, "force", False))
     try:
@@ -65,7 +90,10 @@ def main() -> None:
                 raise SystemExit("ingredient id not found")
             request = CraftRequest(operation=args.operation, ingredient_a=a, ingredient_b=b)
             request.options.persist = not args.no_persist
-            result = RuleSynthesizerEngine(store).craft(request)
+            request.options.use_vectors = args.use_vectors
+            provider = FakeEmbeddingProvider(dimensions=args.vector_dimensions)
+            vector_index = SQLiteVectorIndex(store.conn) if request.options.use_vectors else None
+            result = RuleSynthesizerEngine(store, vector_index=vector_index, embedding_provider=provider).craft(request)
             print(result.model_dump_json(indent=2))
         elif args.command == "eval":
             summary = evaluate_routes(store, limit=args.limit, max_failures=args.failures)
@@ -120,6 +148,23 @@ def main() -> None:
                     json.dumps(
                         {
                             "embedded": len(objects),
+                            "model": provider.model,
+                            "dimensions": provider.dimensions,
+                            "active": embedding_store.count_by_status(EMBEDDING_STATUS_ACTIVE),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            elif args.embed_command == "recipes":
+                provider = FakeEmbeddingProvider(dimensions=args.dimensions)
+                embedding_store = SQLiteEmbeddingStore(store.conn)
+                edges = store.list_route_edges(limit=args.limit)
+                for edge in edges:
+                    embedding_store.ensure_embedding(build_recipe_embedding_text(edge), provider)
+                print(
+                    json.dumps(
+                        {
+                            "embedded": len(edges),
                             "model": provider.model,
                             "dimensions": provider.dimensions,
                             "active": embedding_store.count_by_status(EMBEDDING_STATUS_ACTIVE),
