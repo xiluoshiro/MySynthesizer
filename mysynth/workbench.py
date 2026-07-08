@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from .candidate_generators import LLMCandidateGenerator
 from .embeddings import FakeEmbeddingProvider, SQLiteVectorIndex
 from .engine import RuleSynthesizerEngine
 from .models import CraftRequest
@@ -51,9 +52,16 @@ class WorkbenchService:
         request = CraftRequest(operation=operation, ingredient_a=a, ingredient_b=b)  # type: ignore[arg-type]
         request.options.persist = bool(payload.get("persist", True))
         request.options.use_vectors = bool(payload.get("use_vectors", False))
+        request.options.use_llm = bool(payload.get("use_llm", False))
         vector_index = SQLiteVectorIndex(self.store.conn) if request.options.use_vectors else None
         provider = FakeEmbeddingProvider()
-        result = RuleSynthesizerEngine(self.store, vector_index=vector_index, embedding_provider=provider).craft(request)
+        llm_generator = LLMCandidateGenerator() if request.options.use_llm else None
+        result = RuleSynthesizerEngine(
+            self.store,
+            vector_index=vector_index,
+            embedding_provider=provider,
+            llm_candidate_generator=llm_generator,
+        ).craft(request)
         return result.model_dump(mode="json")
 
     def review(self, action: str, payload: dict[str, object]) -> dict[str, object]:

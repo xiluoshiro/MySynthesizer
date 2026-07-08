@@ -124,6 +124,7 @@ async function craft() {
     operation: state.operation,
     persist: true,
     use_vectors: false,
+    use_llm: document.querySelector("#useLlm").checked,
   });
   renderCraft(data);
   output.textContent = JSON.stringify(data, null, 2);

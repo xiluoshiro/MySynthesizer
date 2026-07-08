@@ -101,6 +101,7 @@ class CraftResult(BaseModel):
     matched_object_id: ObjectId | None = None
     score_breakdown: ScoreBreakdown | None = None
     top_matches: list[MatchScore] = Field(default_factory=list)
+    candidate_errors: list[str] = Field(default_factory=list)
     explanation: str
 
 

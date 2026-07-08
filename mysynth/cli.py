@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .candidate_generators import LLMCandidateGenerator
 from .embeddings import (
     EMBEDDING_STATUS_ACTIVE,
     FakeEmbeddingProvider,
@@ -38,6 +39,7 @@ def main() -> None:
     craft_parser.add_argument("--operation", choices=["add", "subtract"], required=True)
     craft_parser.add_argument("--no-persist", action="store_true")
     craft_parser.add_argument("--use-vectors", action="store_true")
+    craft_parser.add_argument("--use-llm", action="store_true")
     craft_parser.add_argument("--vector-dimensions", type=int, default=16)
 
     eval_parser = subparsers.add_parser("eval")
@@ -99,9 +101,16 @@ def main() -> None:
             request = CraftRequest(operation=args.operation, ingredient_a=a, ingredient_b=b)
             request.options.persist = not args.no_persist
             request.options.use_vectors = args.use_vectors
+            request.options.use_llm = args.use_llm
             provider = FakeEmbeddingProvider(dimensions=args.vector_dimensions)
             vector_index = SQLiteVectorIndex(store.conn) if request.options.use_vectors else None
-            result = RuleSynthesizerEngine(store, vector_index=vector_index, embedding_provider=provider).craft(request)
+            llm_generator = LLMCandidateGenerator() if request.options.use_llm else None
+            result = RuleSynthesizerEngine(
+                store,
+                vector_index=vector_index,
+                embedding_provider=provider,
+                llm_candidate_generator=llm_generator,
+            ).craft(request)
             print(result.model_dump_json(indent=2))
         elif args.command == "eval":
             summary = evaluate_routes(store, limit=args.limit, max_failures=args.failures)

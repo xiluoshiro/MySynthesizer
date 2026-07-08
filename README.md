@@ -14,6 +14,7 @@
 - CLI：`init`、`reset`、`craft`、`eval`、`workbench`、`embed objects/recipes`、`review promote/reject/merge`。
 - 评估与测试看护：根目录 `scripts/run_tests.py` 可一键运行语法检查和单元测试。
 - 向量化实验层：embedding 文本构造、fake provider、SQLite sidecar 表、去重、stale 标记、本地 vector top-k 召回；默认不参与 craft。
+- LLM 候选生成第一版：OpenAI-compatible chat completions，可用环境变量配置，默认关闭，只生成候选并进入现有 ranker/pending 流程。
 - 质量治理基础闭环：active-only 在线召回、`created_pending`、`merged_existing`、`object_aliases`、disabled route、pending 的 promote/reject/merge 审核命令。
 - 本地 workbench：标准库 loopback HTTP + `ui/` 静态页面，可搜索对象、查看对象详情、执行合成、结构化展示结果、审核 pending 和一键还原。
 - PyInstaller 打包脚本：`scripts/build_desktop.py`，已验证真实构建输出 `dist/MySynthesizer/`。
@@ -22,7 +23,7 @@
 
 - 单机 UI 仍是第一版，尚未做批量操作、筛选排序和更完整的审核工作流。
 - 质量治理仍是最小闭环，尚未实现质量评分、审核记录表和批量维护命令。
-- 真实向量模型、ANN 向量库和 LLM 候选生成已降级为远期实验，不是近期主线。
+- 真实向量模型、ANN 向量库和 LLM rerank/质量审核仍是远期实验，不是近期主线。
 
 建议下一步是继续完善 pending 审核记录和批量治理，并考虑给 exe 增加托盘/窗口壳。
 
@@ -53,6 +54,7 @@ mysynth/
   models.py       Pydantic 数据模型：SynthObject、CraftRequest、CraftResult 等
   store.py        SQLiteObjectStore：导入图谱、对象查询、recipe cache、结果持久化
   engine.py       RuleSynthesizerEngine：核心 craft pipeline
+  candidate_generators.py  规则/LLM/组合候选生成器
   candidates.py   第一版规则候选生成
   ranking.py      候选与已有对象评分
   features.py     规则特征抽取
@@ -135,6 +137,17 @@ python -B -m mysynth embed recipes --limit 100
 python -B -m mysynth craft --a 2 --b 3 --operation add --use-vectors
 ```
 
+启用 LLM 候选生成：
+
+```bash
+$env:MYSYNTH_LLM_BASE_URL="https://api.openai.com/v1"
+$env:MYSYNTH_LLM_API_KEY="your_api_key"
+$env:MYSYNTH_LLM_MODEL="your_model"
+python -B -m mysynth craft --a 2 --b 4 --operation subtract --use-llm
+```
+
+LLM 只生成结构化候选，不会绕过 `recipe_cache`、direct route、ranker 或 pending 审核。未配置 key/model 或接口失败时会自动回退到规则候选。Workbench 中的“LLM 候选”开关同样默认关闭。
+
 审核 pending 对象：
 
 ```bash
@@ -180,6 +193,7 @@ dist/MySynthesizer/
 - `init` 默认生成四元素初始库；`init --full` 才导入完整图谱。
 - `--no-persist` 用于只看结果、不写入本地 craft 记录。
 - craft 默认不启用 vector 召回；`--use-vectors` 只用于实验。
+- craft 默认不启用 LLM；`--use-llm` 只影响候选生成层。
 - `embed objects/recipes` 会写入 SQLite 的 embedding sidecar 表，不调用外部模型。
 - vector 召回只作为候选证据，不会覆盖 `recipe_cache` 或 direct route 的确定结果。
 - 未命中确定结果的新合成默认进入 `pending`，不会参与 active 召回；需要通过 `review` 命令审核。

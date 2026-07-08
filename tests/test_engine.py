@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import urllib.request
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from mysynth.candidate_generators import LLMCandidateGenerator
 from mysynth.embeddings import (
     EMBEDDING_STATUS_ACTIVE,
     EMBEDDING_STATUS_STALE,
@@ -139,6 +142,35 @@ def _write_graph(path: Path) -> None:
         ],
     }
     path.write_text(json.dumps(graph, ensure_ascii=False), encoding="utf-8")
+
+
+class _FakeLLMClient:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.calls = 0
+
+    def complete(self, messages: list[dict[str, str]], *, timeout: float) -> str:
+        self.calls += 1
+        return self.response
+
+
+def _llm_response(name: str = "星火灰烬") -> str:
+    return json.dumps(
+        {
+            "candidates": [
+                {
+                    "name": name,
+                    "type": "element",
+                    "description": "由火的热量与石头的稳定性融合出的高温残余。",
+                    "emoji": "🔥",
+                    "core_tags": ["燃烧", "稳定"],
+                    "anchors": [],
+                    "source_reason": "LLM 根据两个输入的核心语义生成更自然的候选。",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
 
 
 class EngineScenarioTests(unittest.TestCase):
@@ -321,6 +353,174 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertEqual(result.result.id, 1)
         self.assertIn("direct route 命中", result.explanation)
         self.assertIsNotNone(self.store.find_recipe("add:2:3"))
+
+    # 测试点：显式开启 LLM 时合法结构化候选会进入现有 ranker 和 pending 流程。
+    def test_llm_candidate_enters_ranker_when_enabled(self) -> None:
+        fire = self.store.get_object(2)
+        stone = self.store.get_object(4)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(stone)
+        fake_client = _FakeLLMClient(_llm_response("星火灰烬"))
+
+        result = RuleSynthesizerEngine(
+            self.store,
+            llm_candidate_generator=LLMCandidateGenerator(client=fake_client),
+        ).craft(
+            CraftRequest(
+                operation="subtract",
+                ingredient_a=fire,
+                ingredient_b=stone,
+                options=CraftOptions(persist=False, use_llm=True, match_threshold=1.01, max_retrieved=0),
+            )
+        )
+
+        self.assertEqual(fake_client.calls, 1)
+        self.assertTrue(result.success)
+        self.assertEqual(result.decision, "created_pending")
+        self.assertEqual(result.candidate.name, "星火灰烬")
+        self.assertEqual(result.result.name, "星火灰烬")
+
+    # 测试点：LLM 返回坏 JSON 时会丢弃 LLM 候选并回退到规则候选。
+    def test_llm_bad_json_falls_back_to_rule_candidate(self) -> None:
+        fire = self.store.get_object(2)
+        stone = self.store.get_object(4)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(stone)
+        fake_client = _FakeLLMClient("{bad json")
+
+        result = RuleSynthesizerEngine(
+            self.store,
+            llm_candidate_generator=LLMCandidateGenerator(client=fake_client),
+        ).craft(
+            CraftRequest(
+                operation="subtract",
+                ingredient_a=fire,
+                ingredient_b=stone,
+                options=CraftOptions(persist=False, use_llm=True, match_threshold=1.01, max_retrieved=0),
+            )
+        )
+
+        self.assertEqual(fake_client.calls, 1)
+        self.assertTrue(result.success)
+        self.assertEqual(result.candidate.name, "无石头火")
+        self.assertTrue(result.candidate_errors)
+
+    # 测试点：LLM 返回缺字段 schema 时会丢弃该候选并保留规则兜底。
+    def test_llm_bad_schema_falls_back_to_rule_candidate(self) -> None:
+        fire = self.store.get_object(2)
+        stone = self.store.get_object(4)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(stone)
+        fake_client = _FakeLLMClient(json.dumps({"candidates": [{"name": "缺字段候选"}]}, ensure_ascii=False))
+
+        result = RuleSynthesizerEngine(
+            self.store,
+            llm_candidate_generator=LLMCandidateGenerator(client=fake_client),
+        ).craft(
+            CraftRequest(
+                operation="subtract",
+                ingredient_a=fire,
+                ingredient_b=stone,
+                options=CraftOptions(persist=False, use_llm=True, match_threshold=1.01, max_retrieved=0),
+            )
+        )
+
+        self.assertEqual(fake_client.calls, 1)
+        self.assertTrue(result.success)
+        self.assertEqual(result.candidate.name, "无石头火")
+        self.assertIn("no valid candidates", result.candidate_errors[0])
+
+    # 测试点：未配置真实 LLM 时启用开关也会回退规则候选而不阻断 craft。
+    def test_unconfigured_llm_falls_back_to_rule_candidate(self) -> None:
+        fire = self.store.get_object(2)
+        stone = self.store.get_object(4)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(stone)
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = RuleSynthesizerEngine(self.store).craft(
+                CraftRequest(
+                    operation="subtract",
+                    ingredient_a=fire,
+                    ingredient_b=stone,
+                    options=CraftOptions(persist=False, use_llm=True, match_threshold=1.01, max_retrieved=0),
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.candidate.name, "无石头火")
+        self.assertIn("LLM is not configured", result.candidate_errors[0])
+
+    # 测试点：use_llm 关闭时即使注入了 LLM 生成器也不会调用它。
+    def test_llm_is_not_called_when_option_is_disabled(self) -> None:
+        fire = self.store.get_object(2)
+        stone = self.store.get_object(4)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(stone)
+        fake_client = _FakeLLMClient(_llm_response())
+
+        RuleSynthesizerEngine(
+            self.store,
+            llm_candidate_generator=LLMCandidateGenerator(client=fake_client),
+        ).craft(
+            CraftRequest(
+                operation="subtract",
+                ingredient_a=fire,
+                ingredient_b=stone,
+                options=CraftOptions(persist=False, use_llm=False),
+            )
+        )
+
+        self.assertEqual(fake_client.calls, 0)
+
+    # 测试点：recipe cache 命中时不会调用 LLM 候选层。
+    def test_recipe_cache_hit_does_not_call_llm(self) -> None:
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+        fake_client = _FakeLLMClient(_llm_response())
+
+        result = RuleSynthesizerEngine(
+            self.store,
+            llm_candidate_generator=LLMCandidateGenerator(client=fake_client),
+        ).craft(
+            CraftRequest(
+                operation="add",
+                ingredient_a=fire,
+                ingredient_b=hydrogen,
+                options=CraftOptions(persist=False, use_llm=True),
+            )
+        )
+
+        self.assertTrue(result.cached)
+        self.assertEqual(fake_client.calls, 0)
+
+    # 测试点：direct route 命中时不会调用 LLM 候选层。
+    def test_direct_route_hit_does_not_call_llm(self) -> None:
+        self.store.conn.execute("DELETE FROM recipe_cache WHERE recipe_key = 'add:2:3'")
+        self.store.conn.commit()
+        self.store.rebuild_indexes()
+        fire = self.store.get_object(2)
+        hydrogen = self.store.get_object(3)
+        self.assertIsNotNone(fire)
+        self.assertIsNotNone(hydrogen)
+        fake_client = _FakeLLMClient(_llm_response())
+
+        result = RuleSynthesizerEngine(
+            self.store,
+            llm_candidate_generator=LLMCandidateGenerator(client=fake_client),
+        ).craft(
+            CraftRequest(
+                operation="add",
+                ingredient_a=fire,
+                ingredient_b=hydrogen,
+                options=CraftOptions(persist=False, use_llm=True),
+            )
+        )
+
+        self.assertIn("direct route 命中", result.explanation)
+        self.assertEqual(fake_client.calls, 0)
 
     # 测试点：候选召回不使用单边邻接，避免无关邻居进入候选池。
     def test_retrieval_does_not_expand_single_side_neighbors(self) -> None:
@@ -781,7 +981,7 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual({obj.id for obj in self.store.list_objects()}, {1, 2, 3, 4})
 
-    # 测试点：workbench HTTP 入口能访问搜索、详情和还原接口。
+    # 测试点：workbench HTTP 入口能访问搜索、详情、LLM craft 和还原接口。
     def test_workbench_http_endpoints_respond(self) -> None:
         process = subprocess.Popen(
             [
@@ -799,6 +999,7 @@ class EngineScenarioTests(unittest.TestCase):
                 "--no-browser",
             ],
             cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, "MYSYNTH_LLM_FAKE_RESPONSE": _llm_response("接口星火")},
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -811,6 +1012,22 @@ class EngineScenarioTests(unittest.TestCase):
                 search_data = json.loads(response.read().decode("utf-8"))
             with urllib.request.urlopen(f"{payload['url']}api/objects/1", timeout=5) as response:
                 detail_data = json.loads(response.read().decode("utf-8"))
+            craft_request = urllib.request.Request(
+                f"{payload['url']}api/craft",
+                data=json.dumps(
+                    {
+                        "a_id": 2,
+                        "b_id": 4,
+                        "operation": "subtract",
+                        "persist": False,
+                        "use_llm": True,
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(craft_request, timeout=5) as response:
+                craft_data = json.loads(response.read().decode("utf-8"))
             reset_request = urllib.request.Request(
                 f"{payload['url']}api/reset",
                 data=b"{}",
@@ -822,6 +1039,7 @@ class EngineScenarioTests(unittest.TestCase):
 
             self.assertIn("objects", search_data)
             self.assertEqual(detail_data["object"]["name"], "水")
+            self.assertEqual(craft_data["candidate"]["name"], "接口星火")
             self.assertEqual({obj["id"] for obj in reset_data["kept_objects"]}, {1, 2, 3, 4})
         finally:
             process.terminate()
@@ -906,6 +1124,43 @@ class EngineScenarioTests(unittest.TestCase):
         finally:
             default_store.close()
             full_store.close()
+
+    # 测试点：CLI craft --use-llm 会读取兼容 LLM 候选并保持 pending 输出。
+    def test_cli_craft_use_llm_accepts_fake_response(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        db_path = Path(self.temp_dir.name) / "cli_llm.db"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "mysynth",
+                "--db",
+                str(db_path),
+                "--source",
+                str(self.graph_path),
+                "craft",
+                "--a",
+                "2",
+                "--b",
+                "4",
+                "--operation",
+                "subtract",
+                "--use-llm",
+                "--no-persist",
+            ],
+            cwd=root,
+            env={**os.environ, "MYSYNTH_LLM_FAKE_RESPONSE": _llm_response("命令行星火")},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        payload = json.loads(completed.stdout)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(payload["candidate"]["name"], "命令行星火")
+        self.assertEqual(payload["decision"], "created_pending")
 
     # 测试点：CLI reset 必须显式确认，确认后只保留初始元素。
     def test_cli_reset_requires_yes_and_resets(self) -> None:

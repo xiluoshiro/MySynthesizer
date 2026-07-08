@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from .candidates import EMOJI_BY_TYPE, generate_candidates
+from .candidate_generators import CandidateGenerator, CompositeCandidateGenerator, LLMCandidateGenerator, RuleCandidateGenerator
+from .candidates import EMOJI_BY_TYPE
 from .embeddings import (
     EmbeddingProvider,
     SQLiteVectorIndex,
@@ -24,10 +25,14 @@ class RuleSynthesizerEngine:
         *,
         vector_index: SQLiteVectorIndex | None = None,
         embedding_provider: EmbeddingProvider | None = None,
+        candidate_generator: CandidateGenerator | None = None,
+        llm_candidate_generator: CandidateGenerator | None = None,
     ) -> None:
         self.store = store
         self.vector_index = vector_index
         self.embedding_provider = embedding_provider
+        self.candidate_generator = candidate_generator or RuleCandidateGenerator()
+        self.llm_candidate_generator = llm_candidate_generator
 
     def craft(self, request: CraftRequest) -> CraftResult:
         # 先处理失败和缓存路径，避免无谓生成候选。
@@ -72,8 +77,9 @@ class RuleSynthesizerEngine:
         a_features = extract_features(request.ingredient_a)
         b_features = extract_features(request.ingredient_b)
         intent = plan_intent(request.ingredient_a, request.ingredient_b, a_features, b_features, request.operation)
-        # 候选生成和匹配分离，后续可直接接入 LLM 候选。
-        candidates = generate_candidates(
+        # 候选生成和匹配分离；LLM 只在显式开启时进入候选层。
+        candidate_generator = self._candidate_generator(request)
+        candidates = candidate_generator.generate(
             request.ingredient_a,
             request.ingredient_b,
             a_features,
@@ -81,8 +87,15 @@ class RuleSynthesizerEngine:
             intent,
             request.options.max_candidates,
         )
+        candidate_errors = _candidate_errors(candidate_generator)
         if not candidates:
-            result = CraftResult(success=False, failure_reason="no_candidates", decision="failed", explanation="候选生成失败")
+            result = CraftResult(
+                success=False,
+                failure_reason="no_candidates",
+                decision="failed",
+                explanation="候选生成失败",
+                candidate_errors=candidate_errors,
+            )
             if request.options.persist:
                 self.store.save_craft_result(request, result)
             return result
@@ -103,6 +116,7 @@ class RuleSynthesizerEngine:
                     matched_object_id=matched.id,
                     score_breakdown=best_match.score,
                     top_matches=top_matches[:5],
+                    candidate_errors=candidate_errors,
                     explanation=self._match_explanation(request, best_candidate, best_match),
                 )
                 if request.options.persist:
@@ -120,6 +134,7 @@ class RuleSynthesizerEngine:
                 matched_object_id=duplicate.id,
                 score_breakdown=best_match.score if best_match else None,
                 top_matches=top_matches[:5],
+                candidate_errors=candidate_errors,
                 explanation=self._merge_explanation(best_candidate, duplicate),
             )
             if request.options.persist:
@@ -135,11 +150,18 @@ class RuleSynthesizerEngine:
             candidate=best_candidate,
             score_breakdown=best_match.score if best_match else None,
             top_matches=top_matches[:5],
+            candidate_errors=candidate_errors,
             explanation=self._create_explanation(request, best_candidate, best_match),
         )
         if request.options.persist:
             self.store.save_craft_result(request, result)
         return result
+
+    def _candidate_generator(self, request: CraftRequest) -> CandidateGenerator:
+        if not request.options.use_llm:
+            return self.candidate_generator
+        llm_generator = self.llm_candidate_generator or LLMCandidateGenerator()
+        return CompositeCandidateGenerator([llm_generator, self.candidate_generator])
 
     def _validate(self, request: CraftRequest) -> str | None:
         if request.ingredient_a.name.strip() == "" or request.ingredient_b.name.strip() == "":
@@ -312,3 +334,11 @@ def _recipe_result_id(owner_id: str) -> int | None:
         return int(parts[3])
     except ValueError:
         return None
+
+
+def _candidate_errors(generator: CandidateGenerator) -> list[str]:
+    errors = getattr(generator, "last_errors", None)
+    if isinstance(errors, list):
+        return [str(error) for error in errors]
+    error = getattr(generator, "last_error", None)
+    return [str(error)] if error else []

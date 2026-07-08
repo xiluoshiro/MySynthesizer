@@ -30,6 +30,7 @@
 - [x] 质量治理基础闭环：active-only 查询、pending/rejected/merged 隔离、promote/reject/merge 审核命令。
 - [x] 初始四元素产品状态：默认库和一键还原只保留 `1=水 / 2=火 / 3=土 / 4=风`。
 - [x] 本地 workbench：exe 内可托管的 loopback 小服务 + `ui/` 静态页面。
+- [x] 真实 LLM 候选生成第一版：OpenAI-compatible、默认关闭、只进入候选层。
 - [x] PyInstaller 打包入口和真实构建验收。
 - [ ] workbench 批量操作、筛选排序、审核记录和桌面窗口壳。
 
@@ -40,7 +41,7 @@
 - FastAPI/HTTP 服务化部署。
 - Qdrant、Milvus、pgvector 等外部向量数据库。
 - 百万级图和服务化运维设计。
-- 真实 LLM 候选生成和真实 ANN 向量库。
+- LLM rerank、LLM 质量审核和真实 ANN 向量库。
 - 真实数据库、用户系统、权限和 cookie 处理。
 
 ## 2. 参考接口
@@ -741,18 +742,37 @@ recipe/edge 向量化边界：
 - 向量库返回的是“相似 recipe/object”，只能作为候选证据进入 ranker、LLM 或质量门槛。
 - 向量库 payload 可以保存 `a_id`、`b_id`、`operation`、`result_id`、`status`，但这些字段只用于过滤和回查，不作为主事实来源。
 
-### Phase 6：LLM 候选生成（未开始）
+### Phase 6：LLM 候选生成（已完成第一版，默认关闭）
 
-- 增加 `CandidateGenerator` 接口。
-- 用结构化 prompt 生成候选。
+- 增加 `CandidateGenerator` 接口，候选生成与 engine 主流程解耦。
+- `RuleCandidateGenerator` 包装现有规则候选。
+- `LLMCandidateGenerator` 调用 OpenAI-compatible chat completions。
+- `CompositeCandidateGenerator` 把 LLM 候选和规则候选去重后交给现有 ranker。
+- 用结构化 prompt 生成候选，输出固定 JSON schema。
 - 保留规则候选作为 fallback。
-- 对候选输出做 schema 校验。
+- 对候选输出做 JSON 和 schema 校验，不合格候选直接丢弃。
+- 环境变量：
+  - `MYSYNTH_LLM_BASE_URL`
+  - `MYSYNTH_LLM_API_KEY`
+  - `MYSYNTH_LLM_MODEL`
+  - `MYSYNTH_LLM_TIMEOUT`
+
+当前实现状态：
+
+- 已新增 `mysynth/candidate_generators.py`。
+- `CraftOptions.use_llm` 作为核心开关，默认 `False`。
+- CLI 新增 `craft --use-llm`。
+- Workbench `/api/craft` 接收 `use_llm=true`。
+- UI 新增“LLM 候选”开关，默认关闭。
+- 未配置 key/model、接口失败、坏 JSON 或 schema 缺字段时，自动回退规则候选。
+- `recipe_cache` 和 direct route 仍在候选生成之前返回，不会调用 LLM。
 
 验收：
 
 - LLM 只生成候选，不直接绕过质量门槛写入 active 图。
-- LLM 输出必须包含 name、type、description、source_reason。
+- LLM 输出必须包含 `name`、`type`、`description`、`emoji`、`core_tags`、`anchors`、`source_reason`。
 - LLM 失败时可回退规则候选。
+- `python -B scripts/run_tests.py` 覆盖 fake LLM 成功、坏 JSON/schema、未配置回退、关闭开关不调用、cache/direct route 不调用、CLI 和 workbench 传参。
 
 ### Phase 7：混合检索与调参（后置实验，近期不作为主链路）
 
@@ -774,9 +794,9 @@ recipe/edge 向量化边界：
 recipe exact cache
 -> direct route evidence
 -> SQLite FTS5 / name / token / type text recall
--> rule candidates + local ranker
+-> rule candidates + optional LLM candidates + local ranker
 -> optional vector top-k objects/recipes
--> future LLM candidate generation / rerank
+-> future LLM rerank / quality review
 ```
 
 确定性查询与相似召回流程：
@@ -796,7 +816,7 @@ flowchart TD
     I --> F
 
     H -- "否" --> J["本地文本召回<br/>FTS5/name/token/type"]
-    J --> K["候选生成<br/>规则候选"]
+    J --> K["候选生成<br/>规则候选 + 可选 LLM 候选"]
     K --> L{"是否启用 vector 实验？"}
     L -- "是" --> M["本地 vector top-k<br/>只作候选证据"]
     L -- "否" --> N["跳过 vector"]
@@ -920,6 +940,7 @@ flowchart TD
 - 提供 `python -B -m mysynth workbench` 本地入口。
 - exe 进程内启动 loopback 小服务，托管 `ui/` 静态 HTML/JS/CSS。
 - UI 第一版支持搜索对象、查看对象详情、选择 A/B、选择 add/subtract、执行 craft、展示 result/decision/explanation/top_matches。
+- UI 第一版支持显式开启“LLM 候选”，默认关闭。
 - UI 第一版支持 pending 的 promote/reject/merge 和一键还原到初始四元素。
 - 提供 `scripts/build_desktop.py --dry-run` 输出打包计划。
 - 提供 `scripts/build_desktop.py` 用 PyInstaller 输出 `dist/MySynthesizer/MySynthesizer.exe`，并带上 exe 同级 `data/` 和 `ui/`。
@@ -1039,7 +1060,7 @@ generate candidates
 | Phase 1-2 | 最小引擎和 SQLite 闭环 | init/craft/eval/test 全通过 |
 | Phase 3-4 | 规则 pipeline、文本召回与评估 | exact/name/type/text/top-k/decision 分桶输出 |
 | Phase 5 | 向量化实验 | embedding 去重率、stale 检测、默认关闭回归测试 |
-| Phase 6 | LLM 候选（后置） | schema 合格率、fallback 率、candidate hit |
+| Phase 6 | LLM 候选（第一版已接入） | schema 合格率、fallback 率、candidate hit |
 | Phase 7 | 混合检索（后置实验） | text recall hit、可选 vector top-k hit、错误分布 |
 | Phase 8 | 只增图治理 | active index 大小、inactive 泄漏数、disabled route 隔离 |
 | Phase 9 | 质量治理 | pending/rejected/merged 比例、promote/reject/merge 一致性 |
