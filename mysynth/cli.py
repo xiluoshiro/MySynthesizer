@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
-from .candidate_generators import LLMCandidateGenerator
+from .candidate_generators import LLMConfig, LLMCandidateGenerator
 from .embeddings import (
     EMBEDDING_STATUS_ACTIVE,
     FakeEmbeddingProvider,
@@ -50,6 +51,7 @@ def main() -> None:
     workbench_parser.add_argument("--host", default="127.0.0.1")
     workbench_parser.add_argument("--port", type=int, default=8765)
     workbench_parser.add_argument("--ui-dir", default="ui")
+    workbench_parser.add_argument("--access-token")
     workbench_parser.add_argument("--no-browser", action="store_true")
 
     review_parser = subparsers.add_parser("review")
@@ -83,6 +85,7 @@ def main() -> None:
             port=args.port,
             ui_dir=Path(args.ui_dir),
             open_browser=not args.no_browser,
+            access_token=args.access_token or os.environ.get("MYSYNTH_WORKBENCH_TOKEN"),
         )
         return
 
@@ -104,7 +107,8 @@ def main() -> None:
             request.options.use_llm = not args.no_llm
             provider = FakeEmbeddingProvider(dimensions=args.vector_dimensions)
             vector_index = SQLiteVectorIndex(store.conn) if request.options.use_vectors else None
-            llm_generator = LLMCandidateGenerator() if request.options.use_llm else None
+            llm_config = LLMConfig.from_settings(store.get_llm_settings(include_secret=True))
+            llm_generator = LLMCandidateGenerator(config=llm_config) if request.options.use_llm else None
             result = RuleSynthesizerEngine(
                 store,
                 vector_index=vector_index,

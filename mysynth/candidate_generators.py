@@ -80,6 +80,8 @@ class LLMConfig:
     api_key: str | None
     model: str | None
     timeout: float
+    temperature: float
+    top_p: float
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
@@ -88,11 +90,37 @@ class LLMConfig:
             api_key=_empty_to_none(os.environ.get("MYSYNTH_LLM_API_KEY")),
             model=_empty_to_none(os.environ.get("MYSYNTH_LLM_MODEL")),
             timeout=_float_env("MYSYNTH_LLM_TIMEOUT", 30.0),
+            temperature=_float_env("MYSYNTH_LLM_TEMPERATURE", 0.7),
+            top_p=_float_env("MYSYNTH_LLM_TOP_P", 1.0),
+        )
+
+    @classmethod
+    def from_settings(cls, settings: dict[str, object] | None = None) -> "LLMConfig":
+        env = cls.from_env()
+        settings = settings or {}
+        return cls(
+            base_url=_text_setting(settings.get("base_url")) or env.base_url,
+            api_key=_text_setting(settings.get("api_key")) or env.api_key,
+            model=_text_setting(settings.get("model")) or env.model,
+            timeout=_float_setting(settings.get("timeout"), env.timeout, 1.0, 300.0),
+            temperature=_float_setting(settings.get("temperature"), env.temperature, 0.0, 2.0),
+            top_p=_float_setting(settings.get("top_p"), env.top_p, 0.0, 1.0),
         )
 
     @property
     def is_configured(self) -> bool:
         return bool(self.api_key and self.model)
+
+    def public_settings(self) -> dict[str, object]:
+        return {
+            "base_url": self.base_url,
+            "api_key": _mask_secret(self.api_key or ""),
+            "model": self.model or "",
+            "timeout": self.timeout,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "configured": self.is_configured,
+        }
 
 
 class OpenAICompatibleLLMClient:
@@ -106,7 +134,8 @@ class OpenAICompatibleLLMClient:
             {
                 "model": self.config.model,
                 "messages": messages,
-                "temperature": 0.7,
+                "temperature": self.config.temperature,
+                "top_p": self.config.top_p,
                 "response_format": {"type": "json_object"},
             },
             ensure_ascii=False,
@@ -277,3 +306,26 @@ def _float_env(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _text_setting(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _float_setting(value: object, default: float, min_value: float, max_value: float) -> float:
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        parsed = default
+    return min(max(parsed, min_value), max_value)
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-4:]}"

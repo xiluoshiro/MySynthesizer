@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
+import ctypes
 import json
 import sqlite3
+import sys
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +17,7 @@ from .normalize import normalize_name, normalize_text, object_search_text, recip
 
 RecipeKey = str
 INITIAL_OBJECT_IDS: tuple[ObjectId, ...] = (1, 2, 3, 4)
+LLM_SETTING_KEYS = {"base_url", "api_key", "model", "timeout", "temperature", "top_p"}
 
 
 class ObjectStore(Protocol):
@@ -171,6 +175,12 @@ class SQLiteObjectStore:
                 owner_id TEXT NOT NULL,
                 status TEXT NOT NULL,
                 error TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
 
@@ -467,6 +477,61 @@ class SQLiteObjectStore:
                 (request_json, result_json, score_json, now),
             )
         self.rebuild_indexes()
+
+    def get_llm_settings(self, *, include_secret: bool = False) -> dict[str, object]:
+        rows = self.conn.execute(
+            "SELECT key, value_json FROM app_settings WHERE key LIKE 'llm.%'"
+        ).fetchall()
+        settings: dict[str, object] = {}
+        for row in rows:
+            key = str(row["key"]).removeprefix("llm.")
+            if key in LLM_SETTING_KEYS:
+                value = json.loads(row["value_json"])
+                if key == "api_key" and isinstance(value, str):
+                    value = _unprotect_secret(value)
+                settings[key] = value
+        if not include_secret and settings.get("api_key"):
+            settings["api_key"] = _mask_secret(str(settings["api_key"]))
+        return settings
+
+    def save_llm_settings(self, payload: dict[str, object]) -> dict[str, object]:
+        now = _utc_now()
+        next_values: dict[str, object] = {}
+        for key in ["base_url", "model"]:
+            value = _optional_text(payload.get(key))
+            if value is not None:
+                next_values[key] = value
+        for key, default, min_value, max_value in [
+            ("timeout", 30.0, 1.0, 300.0),
+            ("temperature", 0.7, 0.0, 2.0),
+            ("top_p", 1.0, 0.0, 1.0),
+        ]:
+            if key in payload:
+                next_values[key] = _bounded_float(payload.get(key), default, min_value, max_value)
+        if bool(payload.get("clear_api_key", False)):
+            next_values["api_key"] = ""
+        else:
+            api_key = _optional_text(payload.get("api_key"))
+            if api_key is not None:
+                next_values["api_key"] = api_key
+
+        with self.conn:
+            for key, value in next_values.items():
+                if key == "api_key" and value == "":
+                    self.conn.execute("DELETE FROM app_settings WHERE key = ?", ("llm.api_key",))
+                    continue
+                stored_value = _protect_secret(str(value)) if key == "api_key" else value
+                self.conn.execute(
+                    """
+                    INSERT INTO app_settings(key, value_json, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value_json=excluded.value_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (f"llm.{key}", json.dumps(stored_value, ensure_ascii=False, separators=(",", ":")), now),
+                )
+        return self.get_llm_settings()
 
     def promote_pending_object(self, object_id: ObjectId) -> SynthObject:
         obj = self.all_objects_by_id.get(object_id)
@@ -780,3 +845,106 @@ def _utc_now() -> str:
 def _fts_query(query: str) -> str:
     tokens = [token for token in tokenize(query) if token]
     return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens[:16])
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _bounded_float(value: object, default: float, min_value: float, max_value: float) -> float:
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        parsed = default
+    return min(max(parsed, min_value), max_value)
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def _protect_secret(value: str) -> str:
+    if not value or sys.platform != "win32":
+        return value
+    try:
+        return "dpapi:" + base64.b64encode(_dpapi_protect(value.encode("utf-8"))).decode("ascii")
+    except Exception:
+        return value
+
+
+def _unprotect_secret(value: str) -> str:
+    if not value.startswith("dpapi:"):
+        return value
+    if sys.platform != "win32":
+        return ""
+    try:
+        return _dpapi_unprotect(base64.b64decode(value.removeprefix("dpapi:"))).decode("utf-8")
+    except Exception:
+        return ""
+
+
+class _DataBlob(ctypes.Structure):
+    _fields_ = [
+        ("cbData", ctypes.c_ulong),
+        ("pbData", ctypes.POINTER(ctypes.c_char)),
+    ]
+
+
+def _dpapi_protect(data: bytes) -> bytes:
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    in_buffer = ctypes.create_string_buffer(data)
+    in_blob = _DataBlob(len(data), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
+    out_blob = _DataBlob()
+    ok = crypt32.CryptProtectData(
+        ctypes.byref(in_blob),
+        "MySynthesizer LLM API key",
+        None,
+        None,
+        None,
+        0x01,
+        ctypes.byref(out_blob),
+    )
+    if not ok:
+        raise OSError("CryptProtectData failed")
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        kernel32.LocalFree(out_blob.pbData)
+
+
+def _dpapi_unprotect(data: bytes) -> bytes:
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    in_buffer = ctypes.create_string_buffer(data)
+    in_blob = _DataBlob(len(data), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
+    out_blob = _DataBlob()
+    ok = crypt32.CryptUnprotectData(
+        ctypes.byref(in_blob),
+        None,
+        None,
+        None,
+        None,
+        0x01,
+        ctypes.byref(out_blob),
+    )
+    if not ok:
+        raise OSError("CryptUnprotectData failed")
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        kernel32.LocalFree(out_blob.pbData)
+
+
+def _public_llm_settings(settings: dict[str, object]) -> dict[str, object]:
+    public = dict(settings)
+    if public.get("api_key"):
+        public["api_key"] = _mask_secret(str(public["api_key"]))
+    return public

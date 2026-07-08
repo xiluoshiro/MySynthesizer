@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hmac
+import ipaddress
 import json
 import mimetypes
+import os
 import sys
 import webbrowser
 from http import HTTPStatus
@@ -10,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .candidate_generators import LLMCandidateGenerator
+from .candidate_generators import LLMConfig, LLMCandidateGenerator
 from .embeddings import FakeEmbeddingProvider, SQLiteVectorIndex
 from .engine import RuleSynthesizerEngine
 from .models import CraftRequest
@@ -55,7 +58,8 @@ class WorkbenchService:
         request.options.use_llm = not bool(payload.get("disable_llm", False))
         vector_index = SQLiteVectorIndex(self.store.conn) if request.options.use_vectors else None
         provider = FakeEmbeddingProvider()
-        llm_generator = LLMCandidateGenerator() if request.options.use_llm else None
+        llm_config = LLMConfig.from_settings(self.store.get_llm_settings(include_secret=True))
+        llm_generator = LLMCandidateGenerator(config=llm_config) if request.options.use_llm else None
         result = RuleSynthesizerEngine(
             self.store,
             vector_index=vector_index,
@@ -79,6 +83,15 @@ class WorkbenchService:
     def reset(self) -> dict[str, object]:
         return self.store.reset_to_initial_state()
 
+    def get_llm_settings(self) -> dict[str, object]:
+        config = LLMConfig.from_settings(self.store.get_llm_settings(include_secret=True))
+        saved = self.store.get_llm_settings()
+        return {**config.public_settings(), **saved, "configured": config.is_configured}
+
+    def save_llm_settings(self, payload: dict[str, object]) -> dict[str, object]:
+        self.store.save_llm_settings(payload)
+        return self.get_llm_settings()
+
 
 def run_workbench(
     *,
@@ -88,16 +101,19 @@ def run_workbench(
     port: int,
     ui_dir: Path = DEFAULT_UI_DIR,
     open_browser: bool = True,
+    access_token: str | None = None,
 ) -> None:
+    validate_workbench_binding(host, access_token)
     store = SQLiteObjectStore(db_path=db_path, source_path=source_path)
     store.initialize()
     service = WorkbenchService(store)
-    handler_cls = _handler(service, ui_dir)
+    handler_cls = _handler(service, ui_dir, access_token=access_token)
     server = HTTPServer((host, port), handler_cls)
     url = f"http://{host}:{server.server_address[1]}/"
+    browser_url = f"{url}?token={access_token}" if access_token else url
     print(json.dumps({"ok": True, "url": url}, ensure_ascii=False), flush=True)
     if open_browser:
-        webbrowser.open(url)
+        webbrowser.open(browser_url)
     try:
         server.serve_forever()
     finally:
@@ -111,6 +127,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--ui-dir", default=str(DEFAULT_UI_DIR))
+    parser.add_argument("--access-token", default=os.environ.get("MYSYNTH_WORKBENCH_TOKEN"))
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     run_workbench(
@@ -120,14 +137,26 @@ def main() -> None:
         port=args.port,
         ui_dir=Path(args.ui_dir),
         open_browser=not args.no_browser,
+        access_token=args.access_token,
     )
 
 
-def _handler(service: WorkbenchService, ui_dir: Path) -> type[BaseHTTPRequestHandler]:
+def validate_workbench_binding(host: str, access_token: str | None) -> None:
+    if _is_loopback_host(host):
+        return
+    if access_token:
+        return
+    raise ValueError("non-loopback workbench host requires --access-token or MYSYNTH_WORKBENCH_TOKEN")
+
+
+def _handler(service: WorkbenchService, ui_dir: Path, *, access_token: str | None) -> type[BaseHTTPRequestHandler]:
     class WorkbenchHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             try:
                 parsed = urlparse(self.path)
+                if parsed.path.startswith("/api/") and not self._authorized(parsed):
+                    self._json({"error": "unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
+                    return
                 if parsed.path == "/api/search":
                     params = parse_qs(parsed.query)
                     query = params.get("q", [""])[0]
@@ -138,6 +167,9 @@ def _handler(service: WorkbenchService, ui_dir: Path) -> type[BaseHTTPRequestHan
                     object_id = int(parsed.path.rsplit("/", 1)[-1])
                     self._json(service.get_object_detail(object_id))
                     return
+                if parsed.path == "/api/settings/llm":
+                    self._json(service.get_llm_settings())
+                    return
                 self._static(parsed.path)
             except Exception as exc:
                 self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -145,12 +177,18 @@ def _handler(service: WorkbenchService, ui_dir: Path) -> type[BaseHTTPRequestHan
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             try:
+                if parsed.path.startswith("/api/") and not self._authorized(parsed):
+                    self._json({"error": "unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
+                    return
                 payload = self._read_json()
                 if parsed.path == "/api/craft":
                     self._json(service.craft(payload))
                     return
                 if parsed.path == "/api/reset":
                     self._json(service.reset())
+                    return
+                if parsed.path == "/api/settings/llm":
+                    self._json(service.save_llm_settings(payload))
                     return
                 if parsed.path.startswith("/api/review/"):
                     action = parsed.path.rsplit("/", 1)[-1]
@@ -167,6 +205,12 @@ def _handler(service: WorkbenchService, ui_dir: Path) -> type[BaseHTTPRequestHan
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8")
             return json.loads(raw or "{}")
+
+        def _authorized(self, parsed) -> bool:
+            if not access_token:
+                return True
+            supplied = self.headers.get("X-Mysynth-Workbench-Token") or parse_qs(parsed.query).get("token", [""])[0]
+            return hmac.compare_digest(str(supplied), access_token)
 
         def _json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -190,6 +234,16 @@ def _handler(service: WorkbenchService, ui_dir: Path) -> type[BaseHTTPRequestHan
             self.wfile.write(body)
 
     return WorkbenchHandler
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().strip("[]").lower()
+    if normalized in {"localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _public_object(obj) -> dict[str, object]:

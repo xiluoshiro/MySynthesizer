@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mysynth.candidate_generators import LLMCandidateGenerator
+from mysynth.candidate_generators import LLMConfig, LLMCandidateGenerator
 from mysynth.embeddings import (
     EMBEDDING_STATUS_ACTIVE,
     EMBEDDING_STATUS_STALE,
@@ -26,7 +28,8 @@ from mysynth.engine import RuleSynthesizerEngine
 from mysynth.evaluation import evaluate_routes
 from mysynth.models import CandidateObject, CraftOptions, CraftRequest, SynthObject
 from mysynth.store import SQLiteObjectStore
-from mysynth.workbench import WorkbenchService
+from mysynth.workbench import WorkbenchService, validate_workbench_binding
+from scripts.build_desktop import _prepare_release_engine_data
 
 
 def _write_graph(path: Path) -> None:
@@ -248,6 +251,68 @@ class EngineScenarioTests(unittest.TestCase):
             self.assertEqual(count, 0, table)
         self.assertTrue({obj.id for obj in self.store.search_text("火蜥蜴 特殊待定", limit=10)} <= {1, 2, 3, 4})
         self.assertIn(2, {obj.id for obj in self.store.search_text("燃烧", limit=10)})
+
+    # 测试点：LLM 设置保存到本地 SQLite，读取时会脱敏且 reset 不会清除配置。
+    def test_llm_settings_are_saved_masked_and_survive_reset(self) -> None:
+        saved = self.store.save_llm_settings(
+            {
+                "base_url": "http://localhost:11434/v1",
+                "api_key": "sk-test-123456",
+                "model": "local-model",
+                "temperature": 0.3,
+                "top_p": 0.8,
+                "timeout": 12,
+            }
+        )
+
+        self.assertEqual(saved["api_key"], "sk-t...3456")
+        secret = self.store.get_llm_settings(include_secret=True)
+        public = self.store.get_llm_settings()
+        stored_value = json.loads(
+            self.store.conn.execute("SELECT value_json FROM app_settings WHERE key = ?", ("llm.api_key",)).fetchone()[0]
+        )
+        self.store.reset_to_initial_state()
+        after_reset = self.store.get_llm_settings(include_secret=True)
+
+        self.assertEqual(secret["api_key"], "sk-test-123456")
+        self.assertEqual(public["api_key"], "sk-t...3456")
+        if sys.platform == "win32":
+            self.assertTrue(stored_value.startswith("dpapi:"))
+        self.assertNotEqual(stored_value, "sk-test-123456")
+        self.assertEqual(secret["temperature"], 0.3)
+        self.assertEqual(secret["top_p"], 0.8)
+        self.assertEqual(after_reset["api_key"], "sk-test-123456")
+
+    # 测试点：保存 LLM 设置时空 api_key 会保留旧密钥，clear_api_key 才会删除。
+    def test_llm_settings_keep_or_clear_api_key_explicitly(self) -> None:
+        self.store.save_llm_settings({"api_key": "sk-keep-123456", "model": "model-a"})
+        kept = self.store.save_llm_settings({"model": "model-b", "api_key": ""})
+        cleared = self.store.save_llm_settings({"clear_api_key": True})
+
+        self.assertEqual(self.store.get_llm_settings(include_secret=True).get("api_key"), None)
+        self.assertEqual(kept["api_key"], "sk-k...3456")
+        self.assertNotIn("api_key", cleared)
+
+    # 测试点：LLMConfig 会优先使用本地设置，并用环境变量补齐缺失项。
+    def test_llm_config_prefers_saved_settings_over_env(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "MYSYNTH_LLM_BASE_URL": "http://env/v1",
+                "MYSYNTH_LLM_API_KEY": "env-key",
+                "MYSYNTH_LLM_MODEL": "env-model",
+                "MYSYNTH_LLM_TEMPERATURE": "1.2",
+                "MYSYNTH_LLM_TOP_P": "0.4",
+            },
+            clear=True,
+        ):
+            config = LLMConfig.from_settings({"base_url": "http://saved/v1", "model": "saved-model", "temperature": 0.2})
+
+        self.assertEqual(config.base_url, "http://saved/v1")
+        self.assertEqual(config.model, "saved-model")
+        self.assertEqual(config.api_key, "env-key")
+        self.assertEqual(config.temperature, 0.2)
+        self.assertEqual(config.top_p, 0.4)
 
     # 测试点：默认在线视图会隔离 pending 对象，避免进入查询和召回。
     def test_store_filters_inactive_objects_from_online_view(self) -> None:
@@ -979,7 +1044,37 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual({obj.id for obj in self.store.list_objects()}, {1, 2, 3, 4})
 
-    # 测试点：workbench HTTP 入口能访问搜索、详情、LLM craft 和还原接口。
+    # 测试点：WorkbenchService 会保存并脱敏返回 LLM 设置。
+    def test_workbench_service_saves_llm_settings(self) -> None:
+        service = WorkbenchService(self.store)
+
+        result = service.save_llm_settings(
+            {
+                "base_url": "http://localhost:8080/v1",
+                "api_key": "sk-ui-abcdef",
+                "model": "ui-model",
+                "temperature": 0.4,
+                "top_p": 0.9,
+                "timeout": 8,
+            }
+        )
+        loaded = service.get_llm_settings()
+
+        self.assertTrue(result["configured"])
+        self.assertEqual(result["api_key"], "sk-u...cdef")
+        self.assertEqual(loaded["model"], "ui-model")
+        self.assertEqual(loaded["temperature"], 0.4)
+
+    # 测试点：Workbench 绑定到非本机地址时必须显式配置访问令牌。
+    def test_workbench_remote_binding_requires_access_token(self) -> None:
+        validate_workbench_binding("127.0.0.1", None)
+        validate_workbench_binding("localhost", None)
+        validate_workbench_binding("0.0.0.0", "dev-token")
+
+        with self.assertRaises(ValueError):
+            validate_workbench_binding("0.0.0.0", None)
+
+    # 测试点：workbench HTTP 入口能访问搜索、详情、LLM 设置、LLM craft 和还原接口。
     def test_workbench_http_endpoints_respond(self) -> None:
         process = subprocess.Popen(
             [
@@ -1010,6 +1105,25 @@ class EngineScenarioTests(unittest.TestCase):
                 search_data = json.loads(response.read().decode("utf-8"))
             with urllib.request.urlopen(f"{payload['url']}api/objects/1", timeout=5) as response:
                 detail_data = json.loads(response.read().decode("utf-8"))
+            settings_request = urllib.request.Request(
+                f"{payload['url']}api/settings/llm",
+                data=json.dumps(
+                    {
+                        "base_url": "http://localhost:11434/v1",
+                        "api_key": "sk-http-abcdef",
+                        "model": "http-model",
+                        "temperature": 0.5,
+                        "top_p": 0.75,
+                        "timeout": 9,
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(settings_request, timeout=5) as response:
+                settings_data = json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(f"{payload['url']}api/settings/llm", timeout=5) as response:
+                loaded_settings = json.loads(response.read().decode("utf-8"))
             craft_request = urllib.request.Request(
                 f"{payload['url']}api/craft",
                 data=json.dumps(
@@ -1036,8 +1150,60 @@ class EngineScenarioTests(unittest.TestCase):
 
             self.assertIn("objects", search_data)
             self.assertEqual(detail_data["object"]["name"], "水")
+            self.assertEqual(settings_data["api_key"], "sk-h...cdef")
+            self.assertEqual(loaded_settings["model"], "http-model")
             self.assertEqual(craft_data["candidate"]["name"], "接口星火")
             self.assertEqual({obj["id"] for obj in reset_data["kept_objects"]}, {1, 2, 3, 4})
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+    # 测试点：Workbench 配置访问令牌后会拒绝未带令牌的 API 请求。
+    def test_workbench_http_access_token_protects_api(self) -> None:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "mysynth",
+                "--db",
+                str(self.db_path),
+                "--source",
+                str(self.graph_path),
+                "workbench",
+                "--port",
+                "0",
+                "--access-token",
+                "dev-token",
+                "--no-browser",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            self.assertIsNotNone(process.stdout)
+            payload = json.loads(process.stdout.readline())
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(f"{payload['url']}api/search?q=%E6%B0%B4&limit=1", timeout=5)
+            authed_request = urllib.request.Request(
+                f"{payload['url']}api/search?q=%E6%B0%B4&limit=1",
+                headers={"X-Mysynth-Workbench-Token": "dev-token"},
+            )
+            with urllib.request.urlopen(authed_request, timeout=5) as response:
+                authed_data = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(raised.exception.code, 401)
+            self.assertIn("objects", authed_data)
         finally:
             process.terminate()
             try:
@@ -1064,6 +1230,23 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertTrue(payload["ok"])
         self.assertIn("ui", payload["plan"])
+
+    # 测试点：桌面发布数据库会从源图谱重建并清除本机 LLM 密钥。
+    def test_release_engine_data_does_not_include_llm_settings(self) -> None:
+        release_dir = Path(self.temp_dir.name) / "release" / "data" / "engine"
+
+        _prepare_release_engine_data(release_dir, source_path=self.graph_path)
+        conn = sqlite3.connect(release_dir / "mysynth.db")
+        try:
+            rows = conn.execute("SELECT key FROM app_settings WHERE key LIKE 'llm.%'").fetchall()
+            object_count = conn.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertEqual(rows, [])
+        self.assertEqual(object_count, 4)
+        self.assertFalse((release_dir / "mysynth.db-wal").exists())
+        self.assertFalse((release_dir / "mysynth.db-shm").exists())
 
     # 测试点：CLI init 默认只保留初始元素，--full 保留完整导入。
     def test_cli_init_default_and_full_modes(self) -> None:

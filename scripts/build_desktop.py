@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -30,7 +31,8 @@ def main() -> int:
         "entry": str(ENTRY_SCRIPT),
         "dist": str(DIST_DIR),
         "ui": str(ROOT / "ui"),
-        "data": str(ROOT / "data" / "engine" / "mysynth.db"),
+        "source": str(ROOT / "outputs" / "data" / "current" / "mysynthesizer_mine_full_routes_latest.json"),
+        "release_data": "generated clean SQLite data without local app_settings",
         "runtime_ui": str(DIST_DIR / "ui"),
         "runtime_data": str(DIST_DIR / "data" / "engine"),
         "requires_pyinstaller": True,
@@ -49,23 +51,27 @@ def main() -> int:
         print("pyinstaller not found; install it or run with --dry-run", file=sys.stderr)
         return 2
 
-    command = [
-        *pyinstaller,
-        "--noconfirm",
-        "--name",
-        args.name,
-        "--paths",
-        str(ROOT),
-        "--add-data",
-        f"{ROOT / 'ui'}{os.pathsep}ui",
-        "--add-data",
-        f"{ROOT / 'data' / 'engine'}{os.pathsep}data/engine",
-        str(ENTRY_SCRIPT),
-    ]
-    completed = subprocess.run(command, cwd=ROOT, check=False)
-    if completed.returncode != 0:
-        return completed.returncode
-    _copy_runtime_assets()
+    source_path = ROOT / "outputs" / "data" / "current" / "mysynthesizer_mine_full_routes_latest.json"
+    with tempfile.TemporaryDirectory(prefix="mysynth-release-") as temp_dir:
+        release_data_dir = Path(temp_dir) / "data" / "engine"
+        _prepare_release_engine_data(release_data_dir, source_path=source_path)
+        command = [
+            *pyinstaller,
+            "--noconfirm",
+            "--name",
+            args.name,
+            "--paths",
+            str(ROOT),
+            "--add-data",
+            f"{ROOT / 'ui'}{os.pathsep}ui",
+            "--add-data",
+            f"{release_data_dir}{os.pathsep}data/engine",
+            str(ENTRY_SCRIPT),
+        ]
+        completed = subprocess.run(command, cwd=ROOT, check=False)
+        if completed.returncode != 0:
+            return completed.returncode
+        _copy_runtime_assets(release_data_dir)
     return 0
 
 
@@ -78,18 +84,32 @@ def _pyinstaller_command() -> list[str] | None:
     return None
 
 
-def _copy_runtime_assets() -> None:
+def _copy_runtime_assets(release_data_dir: Path) -> None:
     shutil.copytree(ROOT / "ui", DIST_DIR / "ui", dirs_exist_ok=True)
-    shutil.copytree(ROOT / "data" / "engine", DIST_DIR / "data" / "engine", dirs_exist_ok=True)
+    runtime_data_dir = DIST_DIR / "data" / "engine"
+    if runtime_data_dir.exists():
+        shutil.rmtree(runtime_data_dir)
+    shutil.copytree(release_data_dir, runtime_data_dir)
+
+
+def _prepare_release_engine_data(target_dir: Path, *, source_path: Path) -> None:
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
     store = SQLiteObjectStore(
-        db_path=DIST_DIR / "data" / "engine" / "mysynth.db",
-        source_path=ROOT / "outputs" / "data" / "current" / "mysynthesizer_mine_full_routes_latest.json",
+        db_path=target_dir / "mysynth.db",
+        source_path=source_path,
     )
     try:
         store.initialize(full_import=True)
         store.reset_to_initial_state()
+        store.conn.execute("DELETE FROM app_settings WHERE key LIKE 'llm.%'")
+        store.conn.commit()
+        store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         store.close()
+    for sidecar in target_dir.glob("mysynth.db-*"):
+        sidecar.unlink()
 
 
 if __name__ == "__main__":

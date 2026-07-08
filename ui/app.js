@@ -8,9 +8,11 @@ const results = document.querySelector("#results");
 const output = document.querySelector("#output");
 const reviewOutput = document.querySelector("#reviewOutput");
 const resetOutput = document.querySelector("#resetOutput");
+const llmSettingsOutput = document.querySelector("#llmSettingsOutput");
 const objectDetail = document.querySelector("#objectDetail");
 const craftSummary = document.querySelector("#craftSummary");
 const topMatches = document.querySelector("#topMatches");
+const workbenchToken = new URLSearchParams(window.location.search).get("token") || "";
 
 document.querySelector("#opAdd").addEventListener("click", () => setOperation("add"));
 document.querySelector("#opSubtract").addEventListener("click", () => setOperation("subtract"));
@@ -23,8 +25,10 @@ document.querySelector("#promoteButton").addEventListener("click", () => review(
 document.querySelector("#rejectButton").addEventListener("click", () => review("reject"));
 document.querySelector("#mergeButton").addEventListener("click", () => review("merge"));
 document.querySelector("#resetButton").addEventListener("click", resetToInitial);
+document.querySelector("#saveLlmSettingsButton").addEventListener("click", saveLlmSettings);
 
 search();
+loadLlmSettings();
 
 function setOperation(operation) {
   state.operation = operation;
@@ -210,18 +214,64 @@ async function resetToInitial() {
   resetOutput.textContent = JSON.stringify(data, null, 2);
 }
 
+async function loadLlmSettings() {
+  const data = await getJson("/api/settings/llm");
+  renderLlmSettings(data);
+}
+
+async function saveLlmSettings() {
+  const payload = {
+    base_url: document.querySelector("#llmBaseUrl").value.trim(),
+    model: document.querySelector("#llmModel").value.trim(),
+    api_key: document.querySelector("#llmApiKey").value.trim(),
+    temperature: numberOrNull("#llmTemperature"),
+    top_p: numberOrNull("#llmTopP"),
+    timeout: numberOrNull("#llmTimeout"),
+    clear_api_key: document.querySelector("#llmClearKey").checked,
+  };
+  const data = await postJson("/api/settings/llm", payload);
+  document.querySelector("#llmApiKey").value = "";
+  document.querySelector("#llmClearKey").checked = false;
+  renderLlmSettings(data);
+}
+
+function renderLlmSettings(data) {
+  if (data.error) {
+    llmSettingsOutput.textContent = JSON.stringify(data, null, 2);
+    return;
+  }
+  document.querySelector("#llmBaseUrl").value = data.base_url || "";
+  document.querySelector("#llmModel").value = data.model || "";
+  document.querySelector("#llmTemperature").value = data.temperature ?? "";
+  document.querySelector("#llmTopP").value = data.top_p ?? "";
+  document.querySelector("#llmTimeout").value = data.timeout ?? "";
+  llmSettingsOutput.textContent = JSON.stringify({
+    configured: Boolean(data.configured),
+    base_url: data.base_url || "",
+    model: data.model || "",
+    api_key: data.api_key || "",
+    temperature: data.temperature,
+    top_p: data.top_p,
+    timeout: data.timeout,
+  }, null, 2);
+}
+
 async function getJson(url) {
-  const response = await fetch(url);
+  const response = await fetch(url, { headers: authHeaders() });
   return response.json();
 }
 
 async function postJson(url, payload) {
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload),
   });
   return response.json();
+}
+
+function authHeaders() {
+  return workbenchToken ? { "X-Mysynth-Workbench-Token": workbenchToken } : {};
 }
 
 function fieldRow(label, value) {
@@ -231,6 +281,11 @@ function fieldRow(label, value) {
 
 function badge(value, tone = "") {
   return `<span class="badge ${tone}">${escapeHtml(value)}</span>`;
+}
+
+function numberOrNull(selector) {
+  const value = document.querySelector(selector).value;
+  return value === "" ? null : Number(value);
 }
 
 function escapeHtml(value) {

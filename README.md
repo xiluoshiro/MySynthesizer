@@ -14,7 +14,7 @@
 - CLI：`init`、`reset`、`craft`、`eval`、`workbench`、`embed objects/recipes`、`review promote/reject/merge`。
 - 评估与测试看护：根目录 `scripts/run_tests.py` 可一键运行语法检查和单元测试。
 - 向量化实验层：embedding 文本构造、fake provider、SQLite sidecar 表、去重、stale 标记、本地 vector top-k 召回；craft 默认 auto on，缺少 provider/index 或 active embedding 时自动跳过。
-- LLM 候选生成第一版：OpenAI-compatible chat completions，可用环境变量配置，默认 auto on，只生成候选并进入现有 ranker/pending 流程。
+- LLM 候选生成第一版：OpenAI-compatible chat completions，可在 UI 保存 base url、api key、model、temperature、top_p、timeout，默认 auto on，只生成候选并进入现有 ranker/pending 流程。
 - 质量治理基础闭环：active-only 在线召回、`created_pending`、`merged_existing`、`object_aliases`、disabled route、pending 的 promote/reject/merge 审核命令。
 - 本地 workbench：标准库 loopback HTTP + `ui/` 静态页面，可搜索对象、查看对象详情、执行合成、结构化展示结果、审核 pending 和一键还原。
 - PyInstaller 打包脚本：`scripts/build_desktop.py`，已验证真实构建输出 `dist/MySynthesizer/`。
@@ -139,14 +139,25 @@ python -B -m mysynth craft --a 2 --b 3 --operation add --no-vectors
 
 配置 LLM 候选生成：
 
+- Workbench 右侧“LLM 设置”可保存 `base_url`、`api_key`、`model`、`temperature`、`top_p`、`timeout` 到本地 SQLite；Windows 上 `api_key` 会先用当前用户 DPAPI 保护后再落库。
+- `GET /api/settings/llm` 只返回脱敏 key。
+- `POST /api/settings/llm` 中 `api_key` 留空会保留旧 key；勾选清除 key 才会删除。
+- 还原初始四元素不会清空 LLM 设置。
+- LLM `api_key` 属于本机用户配置，不会写入发布包；桌面打包会从源图谱重建干净 SQLite 并清除 `llm.*` 设置。
+- Workbench 默认只绑定 `127.0.0.1`；如果显式绑定到非本机地址，必须提供 `--access-token` 或 `MYSYNTH_WORKBENCH_TOKEN`。
+
+CLI 也支持环境变量兜底：
+
 ```bash
 $env:MYSYNTH_LLM_BASE_URL="https://api.openai.com/v1"
 $env:MYSYNTH_LLM_API_KEY="your_api_key"
 $env:MYSYNTH_LLM_MODEL="your_model"
+$env:MYSYNTH_LLM_TEMPERATURE="0.7"
+$env:MYSYNTH_LLM_TOP_P="1"
 python -B -m mysynth craft --a 2 --b 4 --operation subtract
 ```
 
-LLM 默认启用，只生成结构化候选，不会绕过 `recipe_cache`、direct route、ranker 或 pending 审核。未配置 key/model 或接口失败时会自动回退到规则候选。Workbench 不提供 LLM 开关；开发排障时 CLI 可使用 `--no-llm`。
+LLM 默认启用，只生成结构化候选，不会绕过 `recipe_cache`、direct route、ranker 或 pending 审核。本地 SQLite 设置优先，环境变量兜底；未配置 key/model 或接口失败时会自动回退到规则候选。Workbench 不提供 LLM 开关；开发排障时 CLI 可使用 `--no-llm`。
 
 审核 pending 对象：
 

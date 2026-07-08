@@ -751,11 +751,19 @@ recipe/edge 向量化边界：
 - 用结构化 prompt 生成候选，输出固定 JSON schema。
 - 保留规则候选作为 fallback。
 - 对候选输出做 JSON 和 schema 校验，不合格候选直接丢弃。
-- 环境变量：
+- 配置来源：
+  - Workbench UI 写入本地 SQLite `app_settings`，优先级最高。
+  - Windows 上 `api_key` 用当前用户 DPAPI 保护后落库，读取时透明解密；旧明文值兼容读取。
+  - 环境变量作为 CLI/部署兜底。
+  - `api_key` 读取接口只返回脱敏值，POST 空 key 保留旧 key。
+  - 桌面发布包使用从源图谱重建的干净 SQLite，不复制本机 `app_settings`。
+- 支持配置项：
   - `MYSYNTH_LLM_BASE_URL`
   - `MYSYNTH_LLM_API_KEY`
   - `MYSYNTH_LLM_MODEL`
   - `MYSYNTH_LLM_TIMEOUT`
+  - `MYSYNTH_LLM_TEMPERATURE`
+  - `MYSYNTH_LLM_TOP_P`
 
 当前实现状态：
 
@@ -763,7 +771,11 @@ recipe/edge 向量化边界：
 - `CraftOptions.use_llm` 默认 `True`，表示产品路径默认尝试 LLM 候选。
 - CLI 默认使用 LLM 候选；`craft --no-llm` 仅用于开发排障。
 - Workbench `/api/craft` 默认使用 LLM 候选；`disable_llm=true` 仅作为调试参数。
-- UI 不提供 LLM 开关，避免把主链路能力暴露成用户配置。
+- Workbench 新增 `/api/settings/llm`：
+  - `GET` 返回 base url、model、temperature、top_p、timeout、脱敏 api key 和 configured。
+  - `POST` 保存本机 LLM 设置，`api_key` 留空保留旧 key，`clear_api_key=true` 才删除。
+- Workbench 默认绑定本机；绑定非 loopback host 时必须配置 `--access-token` 或 `MYSYNTH_WORKBENCH_TOKEN`，API 请求需带 `X-Mysynth-Workbench-Token`。
+- UI 不提供 LLM 开关，只提供 LLM 设置表单，避免把主链路能力暴露成是否启用的用户配置。
 - 未配置 key/model、接口失败、坏 JSON 或 schema 缺字段时，自动回退规则候选。
 - `recipe_cache` 和 direct route 仍在候选生成之前返回，不会调用 LLM。
 
@@ -772,7 +784,7 @@ recipe/edge 向量化边界：
 - LLM 只生成候选，不直接绕过质量门槛写入 active 图。
 - LLM 输出必须包含 `name`、`type`、`description`、`emoji`、`core_tags`、`anchors`、`source_reason`。
 - LLM 失败时可回退规则候选。
-- `python -B scripts/run_tests.py` 覆盖 fake LLM 成功、坏 JSON/schema、未配置回退、关闭开关不调用、cache/direct route 不调用、CLI 和 workbench 传参。
+- `python -B scripts/run_tests.py` 覆盖 fake LLM 成功、坏 JSON/schema、未配置回退、关闭开关不调用、cache/direct route 不调用、CLI 和 workbench 传参，以及本地 LLM 设置保存/脱敏/reset 保留。
 
 ### Phase 7：混合检索与调参（后置实验，近期不作为主链路）
 
@@ -941,6 +953,7 @@ flowchart TD
 - exe 进程内启动 loopback 小服务，托管 `ui/` 静态 HTML/JS/CSS。
 - UI 第一版支持搜索对象、查看对象详情、选择 A/B、选择 add/subtract、执行 craft、展示 result/decision/explanation/top_matches。
 - UI 第一版默认使用 LLM 候选，不提供用户开关。
+- UI 第一版支持 LLM 设置：base url、api key、model、temperature、top_p、timeout；配置保存在本机 SQLite。
 - UI 第一版支持 pending 的 promote/reject/merge 和一键还原到初始四元素。
 - 提供 `scripts/build_desktop.py --dry-run` 输出打包计划。
 - 提供 `scripts/build_desktop.py` 用 PyInstaller 输出 `dist/MySynthesizer/MySynthesizer.exe`，并带上 exe 同级 `data/` 和 `ui/`。

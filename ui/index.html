@@ -68,6 +68,23 @@
             <button id="resetButton" class="danger" type="button">还原到初始四元素</button>
             <pre id="resetOutput" class="output small"></pre>
           </section>
+          <section class="maintenance">
+            <label>LLM 设置</label>
+            <input id="llmBaseUrl" type="url" placeholder="base url" autocomplete="off" />
+            <input id="llmModel" type="text" placeholder="model" autocomplete="off" />
+            <input id="llmApiKey" type="password" placeholder="api key（留空则保留）" autocomplete="off" />
+            <div class="settings-row">
+              <input id="llmTemperature" type="number" min="0" max="2" step="0.1" placeholder="temperature" />
+              <input id="llmTopP" type="number" min="0" max="1" step="0.05" placeholder="top_p" />
+            </div>
+            <input id="llmTimeout" type="number" min="1" max="300" step="1" placeholder="timeout 秒" />
+            <label class="check-row">
+              <input id="llmClearKey" type="checkbox" />
+              <span>清除已保存 key</span>
+            </label>
+            <button id="saveLlmSettingsButton" type="button">保存 LLM 设置</button>
+            <pre id="llmSettingsOutput" class="output small"></pre>
+          </section>
         </aside>
       </section>
     </main>
