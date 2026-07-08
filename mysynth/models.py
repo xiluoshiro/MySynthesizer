@@ -49,8 +49,8 @@ class CraftOptions(BaseModel):
     max_candidates: int = 10
     max_retrieved: int = 40
     vector_top_k: int = 10
-    use_vectors: bool = False
-    use_llm: bool = False
+    use_vectors: bool = True
+    use_llm: bool = True
     explain: bool = True
     persist: bool = True
 

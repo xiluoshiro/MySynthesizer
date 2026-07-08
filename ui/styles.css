@@ -75,12 +75,6 @@ input {
   background: #fff;
 }
 
-input[type="checkbox"] {
-  width: 18px;
-  min-height: 18px;
-  padding: 0;
-}
-
 .workspace {
   display: grid;
   grid-template-columns: minmax(280px, 360px) 1fr minmax(260px, 320px);
@@ -167,16 +161,6 @@ label {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-}
-
-.toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  width: fit-content;
-  margin-bottom: 0;
-  color: #334155;
-  font-weight: 600;
 }
 
 .slot {

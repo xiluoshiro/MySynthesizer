@@ -182,8 +182,11 @@ class EngineScenarioTests(unittest.TestCase):
         _write_graph(self.graph_path)
         self.store = SQLiteObjectStore(db_path=self.db_path, source_path=self.graph_path)
         self.store.initialize(force_import=True, full_import=True)
+        self.env_patch = patch.dict(os.environ, {"MYSYNTH_LLM_API_KEY": "", "MYSYNTH_LLM_MODEL": ""})
+        self.env_patch.start()
 
     def tearDown(self) -> None:
+        self.env_patch.stop()
         self.store.close()
         self.temp_dir.cleanup()
 
@@ -354,8 +357,8 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertIn("direct route 命中", result.explanation)
         self.assertIsNotNone(self.store.find_recipe("add:2:3"))
 
-    # 测试点：显式开启 LLM 时合法结构化候选会进入现有 ranker 和 pending 流程。
-    def test_llm_candidate_enters_ranker_when_enabled(self) -> None:
+    # 测试点：默认 LLM auto on 时合法结构化候选会进入现有 ranker 和 pending 流程。
+    def test_llm_candidate_enters_ranker_by_default(self) -> None:
         fire = self.store.get_object(2)
         stone = self.store.get_object(4)
         self.assertIsNotNone(fire)
@@ -370,7 +373,7 @@ class EngineScenarioTests(unittest.TestCase):
                 operation="subtract",
                 ingredient_a=fire,
                 ingredient_b=stone,
-                options=CraftOptions(persist=False, use_llm=True, match_threshold=1.01, max_retrieved=0),
+                options=CraftOptions(persist=False, match_threshold=1.01, max_retrieved=0),
             )
         )
 
@@ -396,7 +399,7 @@ class EngineScenarioTests(unittest.TestCase):
                 operation="subtract",
                 ingredient_a=fire,
                 ingredient_b=stone,
-                options=CraftOptions(persist=False, use_llm=True, match_threshold=1.01, max_retrieved=0),
+                options=CraftOptions(persist=False, match_threshold=1.01, max_retrieved=0),
             )
         )
 
@@ -421,7 +424,7 @@ class EngineScenarioTests(unittest.TestCase):
                 operation="subtract",
                 ingredient_a=fire,
                 ingredient_b=stone,
-                options=CraftOptions(persist=False, use_llm=True, match_threshold=1.01, max_retrieved=0),
+                options=CraftOptions(persist=False, match_threshold=1.01, max_retrieved=0),
             )
         )
 
@@ -430,7 +433,7 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertEqual(result.candidate.name, "无石头火")
         self.assertIn("no valid candidates", result.candidate_errors[0])
 
-    # 测试点：未配置真实 LLM 时启用开关也会回退规则候选而不阻断 craft。
+    # 测试点：未配置真实 LLM 时默认 auto on 会回退规则候选而不阻断 craft。
     def test_unconfigured_llm_falls_back_to_rule_candidate(self) -> None:
         fire = self.store.get_object(2)
         stone = self.store.get_object(4)
@@ -443,7 +446,7 @@ class EngineScenarioTests(unittest.TestCase):
                     operation="subtract",
                     ingredient_a=fire,
                     ingredient_b=stone,
-                    options=CraftOptions(persist=False, use_llm=True, match_threshold=1.01, max_retrieved=0),
+                    options=CraftOptions(persist=False, match_threshold=1.01, max_retrieved=0),
                 )
             )
 
@@ -489,7 +492,7 @@ class EngineScenarioTests(unittest.TestCase):
                 operation="add",
                 ingredient_a=fire,
                 ingredient_b=hydrogen,
-                options=CraftOptions(persist=False, use_llm=True),
+                options=CraftOptions(persist=False),
             )
         )
 
@@ -515,7 +518,7 @@ class EngineScenarioTests(unittest.TestCase):
                 operation="add",
                 ingredient_a=fire,
                 ingredient_b=hydrogen,
-                options=CraftOptions(persist=False, use_llm=True),
+                options=CraftOptions(persist=False),
             )
         )
 
@@ -548,8 +551,8 @@ class EngineScenarioTests(unittest.TestCase):
 
         self.assertNotIn(5, {obj.id for obj in retrieved})
 
-    # 测试点：显式开启 vector 时 object top-k 结果会作为候选证据进入召回池。
-    def test_vector_object_retrieval_adds_candidate_evidence_when_enabled(self) -> None:
+    # 测试点：默认 vector auto on 时已接入的 object top-k 会作为候选证据进入召回池。
+    def test_vector_object_retrieval_adds_candidate_evidence_when_wired(self) -> None:
         vector_only = SynthObject(
             id=10,
             name="向量专用对象",
@@ -594,17 +597,17 @@ class EngineScenarioTests(unittest.TestCase):
                 operation="subtract",
                 ingredient_a=fire,
                 ingredient_b=hydrogen,
-                options=CraftOptions(persist=False, vector_top_k=1, use_vectors=True),
+                options=CraftOptions(persist=False, vector_top_k=1),
             ),
         )
 
         self.assertIn(vector_only.id, {obj.id for obj in retrieved})
 
-    # 测试点：默认 craft 召回不启用 vector，避免 fake embedding 成为主路径。
-    def test_vector_retrieval_is_disabled_by_default(self) -> None:
+    # 测试点：未接入 vector provider 时默认 auto on 也不会产生向量召回。
+    def test_vector_retrieval_skips_when_provider_is_not_wired(self) -> None:
         vector_only = SynthObject(
             id=11,
-            name="默认关闭向量对象",
+            name="未接入向量对象",
             emoji="💡",
             type="item",
             description="只通过向量召回的对象。",
@@ -619,7 +622,6 @@ class EngineScenarioTests(unittest.TestCase):
             core_tags=["zz_default_vector_candidate"],
             source_reason="test",
         )
-        provider = FakeEmbeddingProvider(dimensions=8)
         candidate_text = build_candidate_embedding_text(candidate)
         SQLiteEmbeddingStore(self.store.conn).ensure_embedding(
             EmbeddingText(
@@ -628,18 +630,14 @@ class EngineScenarioTests(unittest.TestCase):
                 text=candidate_text.text,
                 text_hash=candidate_text.text_hash,
             ),
-            provider,
+            FakeEmbeddingProvider(dimensions=8),
         )
         fire = self.store.get_object(2)
         hydrogen = self.store.get_object(3)
         self.assertIsNotNone(fire)
         self.assertIsNotNone(hydrogen)
 
-        retrieved = RuleSynthesizerEngine(
-            self.store,
-            vector_index=SQLiteVectorIndex(self.store.conn),
-            embedding_provider=provider,
-        )._retrieve_for_candidate(
+        retrieved = RuleSynthesizerEngine(self.store)._retrieve_for_candidate(
             candidate,
             CraftRequest(
                 operation="subtract",
@@ -1020,7 +1018,6 @@ class EngineScenarioTests(unittest.TestCase):
                         "b_id": 4,
                         "operation": "subtract",
                         "persist": False,
-                        "use_llm": True,
                     }
                 ).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
@@ -1125,8 +1122,8 @@ class EngineScenarioTests(unittest.TestCase):
             default_store.close()
             full_store.close()
 
-    # 测试点：CLI craft --use-llm 会读取兼容 LLM 候选并保持 pending 输出。
-    def test_cli_craft_use_llm_accepts_fake_response(self) -> None:
+    # 测试点：CLI craft 默认会读取兼容 LLM 候选并保持 pending 输出。
+    def test_cli_craft_uses_llm_by_default_with_fake_response(self) -> None:
         root = Path(__file__).resolve().parents[1]
         db_path = Path(self.temp_dir.name) / "cli_llm.db"
 
@@ -1147,7 +1144,6 @@ class EngineScenarioTests(unittest.TestCase):
                 "4",
                 "--operation",
                 "subtract",
-                "--use-llm",
                 "--no-persist",
             ],
             cwd=root,
@@ -1161,6 +1157,42 @@ class EngineScenarioTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(payload["candidate"]["name"], "命令行星火")
         self.assertEqual(payload["decision"], "created_pending")
+
+    # 测试点：CLI craft --no-llm 会关闭 LLM 候选用于开发排障。
+    def test_cli_craft_can_disable_llm_for_debugging(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        db_path = Path(self.temp_dir.name) / "cli_no_llm.db"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "mysynth",
+                "--db",
+                str(db_path),
+                "--source",
+                str(self.graph_path),
+                "craft",
+                "--a",
+                "2",
+                "--b",
+                "4",
+                "--operation",
+                "subtract",
+                "--no-llm",
+                "--no-persist",
+            ],
+            cwd=root,
+            env={**os.environ, "MYSYNTH_LLM_FAKE_RESPONSE": _llm_response("不应出现")},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        payload = json.loads(completed.stdout)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotEqual(payload["candidate"]["name"], "不应出现")
 
     # 测试点：CLI reset 必须显式确认，确认后只保留初始元素。
     def test_cli_reset_requires_yes_and_resets(self) -> None:

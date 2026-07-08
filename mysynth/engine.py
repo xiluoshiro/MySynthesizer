@@ -77,7 +77,7 @@ class RuleSynthesizerEngine:
         a_features = extract_features(request.ingredient_a)
         b_features = extract_features(request.ingredient_b)
         intent = plan_intent(request.ingredient_a, request.ingredient_b, a_features, b_features, request.operation)
-        # 候选生成和匹配分离；LLM 只在显式开启时进入候选层。
+        # 候选生成和匹配分离；LLM 默认进入候选层，失败后由规则兜底。
         candidate_generator = self._candidate_generator(request)
         candidates = candidate_generator.generate(
             request.ingredient_a,

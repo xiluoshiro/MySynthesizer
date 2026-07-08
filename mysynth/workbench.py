@@ -51,8 +51,8 @@ class WorkbenchService:
             raise ValueError("ingredient id not found")
         request = CraftRequest(operation=operation, ingredient_a=a, ingredient_b=b)  # type: ignore[arg-type]
         request.options.persist = bool(payload.get("persist", True))
-        request.options.use_vectors = bool(payload.get("use_vectors", False))
-        request.options.use_llm = bool(payload.get("use_llm", False))
+        request.options.use_vectors = not bool(payload.get("disable_vectors", False))
+        request.options.use_llm = not bool(payload.get("disable_llm", False))
         vector_index = SQLiteVectorIndex(self.store.conn) if request.options.use_vectors else None
         provider = FakeEmbeddingProvider()
         llm_generator = LLMCandidateGenerator() if request.options.use_llm else None

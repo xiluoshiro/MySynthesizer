@@ -38,8 +38,8 @@ def main() -> None:
     craft_parser.add_argument("--b", type=int, required=True)
     craft_parser.add_argument("--operation", choices=["add", "subtract"], required=True)
     craft_parser.add_argument("--no-persist", action="store_true")
-    craft_parser.add_argument("--use-vectors", action="store_true")
-    craft_parser.add_argument("--use-llm", action="store_true")
+    craft_parser.add_argument("--no-vectors", action="store_true")
+    craft_parser.add_argument("--no-llm", action="store_true")
     craft_parser.add_argument("--vector-dimensions", type=int, default=16)
 
     eval_parser = subparsers.add_parser("eval")
@@ -100,8 +100,8 @@ def main() -> None:
                 raise SystemExit("ingredient id not found")
             request = CraftRequest(operation=args.operation, ingredient_a=a, ingredient_b=b)
             request.options.persist = not args.no_persist
-            request.options.use_vectors = args.use_vectors
-            request.options.use_llm = args.use_llm
+            request.options.use_vectors = not args.no_vectors
+            request.options.use_llm = not args.no_llm
             provider = FakeEmbeddingProvider(dimensions=args.vector_dimensions)
             vector_index = SQLiteVectorIndex(store.conn) if request.options.use_vectors else None
             llm_generator = LLMCandidateGenerator() if request.options.use_llm else None

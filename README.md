@@ -13,8 +13,8 @@
 - 第一版规则合成 pipeline：校验、缓存、特征抽取、意图判断、候选生成、召回、评分、决策、持久化。
 - CLI：`init`、`reset`、`craft`、`eval`、`workbench`、`embed objects/recipes`、`review promote/reject/merge`。
 - 评估与测试看护：根目录 `scripts/run_tests.py` 可一键运行语法检查和单元测试。
-- 向量化实验层：embedding 文本构造、fake provider、SQLite sidecar 表、去重、stale 标记、本地 vector top-k 召回；默认不参与 craft。
-- LLM 候选生成第一版：OpenAI-compatible chat completions，可用环境变量配置，默认关闭，只生成候选并进入现有 ranker/pending 流程。
+- 向量化实验层：embedding 文本构造、fake provider、SQLite sidecar 表、去重、stale 标记、本地 vector top-k 召回；craft 默认 auto on，缺少 provider/index 或 active embedding 时自动跳过。
+- LLM 候选生成第一版：OpenAI-compatible chat completions，可用环境变量配置，默认 auto on，只生成候选并进入现有 ranker/pending 流程。
 - 质量治理基础闭环：active-only 在线召回、`created_pending`、`merged_existing`、`object_aliases`、disabled route、pending 的 promote/reject/merge 审核命令。
 - 本地 workbench：标准库 loopback HTTP + `ui/` 静态页面，可搜索对象、查看对象详情、执行合成、结构化展示结果、审核 pending 和一键还原。
 - PyInstaller 打包脚本：`scripts/build_desktop.py`，已验证真实构建输出 `dist/MySynthesizer/`。
@@ -131,22 +131,22 @@ python -B -m mysynth embed recipes --limit 100
 
 当前 embedding 命令使用确定性的 `fake-hash-v1` provider，用 SQLite sidecar 做本地 brute-force top-k；真实向量模型和 ANN 向量库后续接入。
 
-说明：fake embedding 只是测试替身，没有真实语义能力；craft 默认不启用 vector 召回，需要显式传入：
+说明：fake embedding 只是测试替身，没有真实语义能力；craft 默认进入 vector auto 模式，只有存在可用 provider/index 和 active embedding 时才会把 vector top-k 作为候选证据。开发排障时可以关闭：
 
 ```bash
-python -B -m mysynth craft --a 2 --b 3 --operation add --use-vectors
+python -B -m mysynth craft --a 2 --b 3 --operation add --no-vectors
 ```
 
-启用 LLM 候选生成：
+配置 LLM 候选生成：
 
 ```bash
 $env:MYSYNTH_LLM_BASE_URL="https://api.openai.com/v1"
 $env:MYSYNTH_LLM_API_KEY="your_api_key"
 $env:MYSYNTH_LLM_MODEL="your_model"
-python -B -m mysynth craft --a 2 --b 4 --operation subtract --use-llm
+python -B -m mysynth craft --a 2 --b 4 --operation subtract
 ```
 
-LLM 只生成结构化候选，不会绕过 `recipe_cache`、direct route、ranker 或 pending 审核。未配置 key/model 或接口失败时会自动回退到规则候选。Workbench 中的“LLM 候选”开关同样默认关闭。
+LLM 默认启用，只生成结构化候选，不会绕过 `recipe_cache`、direct route、ranker 或 pending 审核。未配置 key/model 或接口失败时会自动回退到规则候选。Workbench 不提供 LLM 开关；开发排障时 CLI 可使用 `--no-llm`。
 
 审核 pending 对象：
 
@@ -192,8 +192,7 @@ dist/MySynthesizer/
 - 当前主存储是 SQLite，不需要外部数据库服务。
 - `init` 默认生成四元素初始库；`init --full` 才导入完整图谱。
 - `--no-persist` 用于只看结果、不写入本地 craft 记录。
-- craft 默认不启用 vector 召回；`--use-vectors` 只用于实验。
-- craft 默认不启用 LLM；`--use-llm` 只影响候选生成层。
+- craft 默认使用 LLM/vector auto 路径；`--no-llm`、`--no-vectors` 只用于开发排障。
 - `embed objects/recipes` 会写入 SQLite 的 embedding sidecar 表，不调用外部模型。
 - vector 召回只作为候选证据，不会覆盖 `recipe_cache` 或 direct route 的确定结果。
 - 未命中确定结果的新合成默认进入 `pending`，不会参与 active 召回；需要通过 `review` 命令审核。
